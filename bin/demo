@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Narrated walk-through of the POC. Brings up the stack, then runs a sequence of
+# kill / drain / scale-out steps with explanatory pauses so a viewer can follow
+# along on the UI at http://localhost:5173.
+#
+# Run with --auto for a non-interactive smoke run (no Enter prompts, short sleeps).
+
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+COMPOSE="./bin/compose"
+C="./bin/c"
+BASE="http://127.0.0.1:5173"
+TMP="${TMPDIR:-/tmp}/poc-demo.$$.json"
+trap 'rm -f "$TMP"' EXIT
+
+# ── Colours ─────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    BOLD=$'\033[1m'; DIM=$'\033[2m'
+    GREEN=$'\033[32m'; AMBER=$'\033[33m'; RED=$'\033[31m'
+    BLUE=$'\033[34m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+    BOLD=""; DIM=""; GREEN=""; AMBER=""; RED=""; BLUE=""; CYAN=""; RESET=""
+fi
+
+AUTO=0
+if [[ "${1-}" == "--auto" ]]; then AUTO=1; fi
+
+banner() {
+    echo
+    echo "${BOLD}${BLUE}════════════════════════════════════════════════════════════════${RESET}"
+    echo "${BOLD}${BLUE}▌ $*${RESET}"
+    echo "${BOLD}${BLUE}════════════════════════════════════════════════════════════════${RESET}"
+}
+say()   { echo "${CYAN}▸ $*${RESET}"; }
+run()   { echo "${DIM}  \$ $*${RESET}"; eval "$@"; }
+ok()    { echo "${GREEN}  ✓ $*${RESET}"; }
+warn()  { echo "${AMBER}  ⚠ $*${RESET}"; }
+pause() {
+    if [[ $AUTO -eq 1 ]]; then sleep "${1:-3}"; return; fi
+    read -r -p "${DIM}  (press Enter to continue)${RESET}" _
+}
+
+list_servers() {
+    local role="$1"
+    curl -fsS "$BASE/api/$role/servers" >"$TMP"
+    python3 - "$TMP" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+if not data:
+    print("    (empty)")
+else:
+    for s in data:
+        print(f"    {s['id']:15} status={s['status']:9} handled={s['totalHandled']}")
+PY
+}
+
+list_known_nodes() {
+    local role="$1"
+    curl -fsS "$BASE/api/$role/known-nodes" >"$TMP"
+    python3 - "$TMP" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    for n in json.load(f):
+        print(f"    {n['kind']:6} {n['role']:8} {n['nodeId']:12} {n['address']}")
+PY
+}
+
+fire_echoes() {
+    local role="$1" n="$2" ok_count=0 fail_count=0 code server
+    for i in $(seq 1 "$n"); do
+        code=$(curl -sS -o "$TMP" -w "%{http_code}" -X POST "$BASE/api/$role/echo" \
+                -H 'Content-Type: application/json' \
+                -d "{\"message\":\"demo-$role-$i\"}")
+        if [[ "$code" == "200" ]]; then
+            server=$(python3 -c "import json,sys; print(json.load(sys.stdin)['serverId'])" <"$TMP" 2>/dev/null)
+            echo "    → ${server:-?}"
+            ok_count=$((ok_count + 1))
+        else
+            echo "    → HTTP $code"
+            fail_count=$((fail_count + 1))
+        fi
+    done
+    echo "  (${ok_count} ok, ${fail_count} non-200)"
+}
+
+# ── Step 0: bring it up ─────────────────────────────────────────────────────
+banner "Step 0  Bringing up the stack"
+say "1 broker + 4 BFFs + 4 servers + UI (10 containers)"
+run "$COMPOSE up --build -d" 2>&1 | tail -3
+say "Waiting 8 s for registrations to settle..."
+sleep 8
+
+# ── Step 1: verify both buckets are populated ───────────────────────────────
+banner "Step 1  Both buckets self-registered via the broker"
+say "Trading bucket:"; list_servers trading
+say "Billing bucket:"; list_servers billing
+say "Open the UI in a browser: ${BOLD}$BASE${RESET}"
+pause
+
+# ── Step 2: round-robin ─────────────────────────────────────────────────────
+banner "Step 2  Round-robin within the trading bucket"
+say "Firing 6 echoes via nginx → trading BFFs → trading servers"
+fire_echoes trading 6
+ok "Should alternate between server-t-1 and server-t-2"
+pause
+
+# ── Step 3: kill a server abruptly ──────────────────────────────────────────
+banner "Step 3  kill -9 a backend"
+say "Killing server-t-1 — expect detection in ~1–2 s via gRPC keepalive"
+run "$C kill server-t-1"
+say "Waiting 4 s..."
+sleep 4
+say "Trading bucket should now show only server-t-2:"
+list_servers trading
+say "Billing bucket should be completely unaffected:"
+list_servers billing
+ok "Cross-bucket isolation confirmed"
+pause
+
+# ── Step 4: scale out ───────────────────────────────────────────────────────
+banner "Step 4  Spin up a third trading server live"
+run "$COMPOSE --profile extra up -d server-t-3" 2>&1 | tail -3
+say "Waiting 4 s for it to announce + the BFF to wire it in..."
+sleep 4
+list_servers trading
+ok "server-t-3 joined automatically — no config edit, no reload"
+pause
+
+# ── Step 5: graceful drain ──────────────────────────────────────────────────
+banner "Step 5  Graceful drain — opposite of a kill"
+say "Draining server-t-2 — backend flips health NOT_SERVING, finishes in-flight, then exits"
+run "curl -fsS -X POST $BASE/api/trading/servers/server-t-2/drain"
+echo
+say "Watch the UI: amber pill appears, then card slides out (~3 s grace)"
+sleep 5
+list_servers trading
+pause
+
+# ── Step 6: kill a BFF ──────────────────────────────────────────────────────
+banner "Step 6  Kill a BFF — nginx should fail over transparently"
+say "Killing bff-t-1"
+run "$C kill bff-t-1"
+say "Firing 6 echoes — most/all should succeed via bff-t-2"
+sleep 1
+fire_echoes trading 6
+warn "OSS nginx uses passive health checks — every fail_timeout (5 s) it"
+warn "retries the dead BFF and one request pays the 2 s proxy_connect_timeout."
+warn "1 of N returning 504 here is expected; subsequent requests are fine."
+pause
+
+# ── Step 7: cluster topology view ───────────────────────────────────────────
+banner "Step 7  Cross-role observability"
+say "The trading BFF knows about the billing bucket too — just doesn't route to it."
+say "Trading BFF's known-nodes view:"
+list_known_nodes trading
+pause
+
+# ── Wrap ────────────────────────────────────────────────────────────────────
+banner "Done"
+say "Tear down with: ${BOLD}./bin/compose --profile extra down${RESET}"
