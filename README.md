@@ -517,8 +517,7 @@ Note: **7001, not 7000** — macOS Control Center / AirPlay Receiver binds 7000 
 
 ## Things that aren't in scope
 
-- TLS — everything is plaintext. For production, add `useTransportSecurity()` plus a cert source.
-- Persistent registrations — the registry is in-memory, so restarting the BFF empties it. Real deployments would use Consul / etcd / Kubernetes service discovery.
-- Retry / backoff on the `EchoStub.echo` call — currently a single attempt; failure returns 502. A real client would retry on `UNAVAILABLE` and exponential-backoff.
-- Auth between BFF and backends — anyone with network access can register or call `RequestDrain`.
+- TLS — everything is plaintext. 
+- Persistent registrations — the registry is in-memory, so restarting the BFF empties it.
+- Retry / backoff on the `EchoStub.echo` call — currently a single attempt; failure returns 502. No backoff
 - Per-service health (`grpc.health.v1.Health` supports watching individual service names). We only use the overall `""` service watch.
