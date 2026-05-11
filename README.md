@@ -8,7 +8,7 @@ Runs under either **Docker** or **Podman** with auto-detection; the same image s
 
 ---
 
-## Part 1 — Why this matters (for business / non-technical readers)
+## Part 1 — Problem and proposed solution
 
 ### The problem in plain language
 
@@ -59,7 +59,7 @@ A two-minute live walk-through:
 
 ---
 
-## Part 2 — How it works (for developers)
+## Part 2 — Technical implementation
 
 ### Architecture overview
 
