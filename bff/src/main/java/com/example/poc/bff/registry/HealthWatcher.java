@@ -1,7 +1,6 @@
 package com.example.poc.bff.registry;
 
 import io.grpc.Context;
-import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.health.v1.HealthCheckRequest;
 import io.grpc.health.v1.HealthCheckResponse;
@@ -12,47 +11,46 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Holds an open {@code grpc.health.v1.Health/Watch} stream to one backend and reports
- * status transitions back to the {@link ServerRegistry}. {@link #stop()} cancels the
- * stream cleanly so we can distinguish "we hung up" from "the backend died".
+ * status transitions back to the {@link ServerRegistry}. The watcher carries the
+ * {@link ServerEntry} it was created for so that on failure the registry can ignore
+ * stale errors from entries that have already been replaced.
  */
 final class HealthWatcher {
 
     private static final Logger LOG = LoggerFactory.getLogger(HealthWatcher.class);
 
-    private final String serverId;
-    private final ManagedChannel channel;
+    private final ServerEntry entry;
     private final ServerRegistry registry;
     private volatile Context.CancellableContext context;
     private volatile boolean cancelled;
 
-    HealthWatcher(String serverId, ManagedChannel channel, ServerRegistry registry) {
-        this.serverId = serverId;
-        this.channel = channel;
+    HealthWatcher(ServerEntry entry, ServerRegistry registry) {
+        this.entry = entry;
         this.registry = registry;
     }
 
     void start() {
-        HealthGrpc.HealthStub stub = HealthGrpc.newStub(channel);
+        HealthGrpc.HealthStub stub = HealthGrpc.newStub(entry.channel());
         HealthCheckRequest req = HealthCheckRequest.newBuilder().setService("").build();
         StreamObserver<HealthCheckResponse> observer = new StreamObserver<>() {
             @Override
             public void onNext(HealthCheckResponse resp) {
                 if (cancelled) return;
-                registry.touchAndSetStatus(serverId, map(resp.getStatus()));
+                registry.markStatus(entry, map(resp.getStatus()));
             }
 
             @Override
             public void onError(Throwable t) {
                 if (cancelled) return;
-                LOG.info("Health watch for {} errored ({}) — marking DEAD", serverId, t.getMessage());
-                registry.markDeadAndRemove(serverId);
+                LOG.info("Health watch for {} errored ({})", entry.id(), t.getMessage());
+                registry.healthFailed(entry);
             }
 
             @Override
             public void onCompleted() {
                 if (cancelled) return;
-                LOG.info("Health watch for {} ended cleanly — marking DEAD", serverId);
-                registry.markDeadAndRemove(serverId);
+                LOG.info("Health watch for {} ended cleanly", entry.id());
+                registry.healthFailed(entry);
             }
         };
 

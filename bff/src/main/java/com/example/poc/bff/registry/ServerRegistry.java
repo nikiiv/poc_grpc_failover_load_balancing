@@ -24,59 +24,78 @@ public final class ServerRegistry {
         this.events = events;
     }
 
+    /**
+     * Register (or RE-register) a backend. A second RegisterServer call for the same id
+     * means a NEW physical instance (e.g. container restart): the old entry's channel
+     * almost certainly points at a dead peer with a stale IP. So we always replace and
+     * rebuild the channel + watcher.
+     */
     public ServerEntry register(String id, String host, int port) {
-        boolean[] created = { false };
-        ServerEntry entry = entries.computeIfAbsent(id, k -> {
+        ServerEntry[] previous = new ServerEntry[1];
+        ServerEntry fresh = entries.compute(id, (k, existing) -> {
+            if (existing != null) {
+                previous[0] = existing;
+            }
             ManagedChannel ch = NettyChannelBuilder.forAddress(host, port)
                     .usePlaintext()
                     .keepAliveTime(2, TimeUnit.SECONDS)
                     .keepAliveTimeout(1, TimeUnit.SECONDS)
                     .keepAliveWithoutCalls(true)
                     .build();
-            LOG.info("Registered {} @ {}:{}", id, host, port);
-            created[0] = true;
             return new ServerEntry(id, host, port, ch);
         });
-        if (created[0]) {
-            HealthWatcher watcher = new HealthWatcher(id, entry.channel(), this);
-            entry.setHealthCancel(watcher::stop);
-            watcher.start();
-            events.emit(RegistryEvent.serverAdded(ServerView.of(entry)));
+
+        // Tear down the prior entry's resources outside the map's compute lock.
+        if (previous[0] != null) {
+            LOG.info("Replacing stale entry for {} (was {}:{})", id, previous[0].host(), previous[0].port());
+            previous[0].cancelHealth();
+            previous[0].channel().shutdownNow();
+            // No serverRemoved event — we go straight from old-card to new-card via serverAdded below.
         }
-        return entry;
+
+        HealthWatcher watcher = new HealthWatcher(fresh, this);
+        fresh.setHealthCancel(watcher::stop);
+        watcher.start();
+        events.emit(RegistryEvent.serverAdded(ServerView.of(fresh)));
+        LOG.info("Registered {} @ {}:{}", id, host, port);
+        return fresh;
     }
 
-    public void remove(String id) {
-        ServerEntry e = entries.remove(id);
-        if (e != null) {
-            e.cancelHealth();
-            e.channel().shutdownNow();
-            events.emit(RegistryEvent.serverRemoved(id));
-        }
-    }
-
-    /** Health stream said NOT_SERVING / UNHEALTHY / SERVING — update + emit if changed. */
-    public void touchAndSetStatus(String id, ServerStatus status) {
-        ServerEntry e = entries.get(id);
-        if (e == null) return;
-        e.touch();
-        if (e.setStatus(status)) {
-            events.emit(RegistryEvent.statusChanged(id, status.name()));
+    /** Called from {@link HealthWatcher#onNext}. Touch + update status on the watcher's own entry. */
+    public void markStatus(ServerEntry entry, ServerStatus status) {
+        entry.touch();
+        if (entry.setStatus(status)) {
+            events.emit(RegistryEvent.statusChanged(entry.id(), status.name()));
         }
     }
 
-    /** Health stream broke or completed: backend is gone. Flash DEAD then remove. */
-    public void markDeadAndRemove(String id) {
-        ServerEntry e = entries.get(id);
-        if (e == null) return;
-        if (e.setStatus(ServerStatus.DEAD)) {
-            events.emit(RegistryEvent.statusChanged(id, ServerStatus.DEAD.name()));
+    /**
+     * Called from {@link HealthWatcher#onError}/{@link HealthWatcher#onCompleted}. Only
+     * removes the entry if the registry still holds the SAME instance the watcher was
+     * watching — otherwise the entry has already been replaced by a newer registration
+     * and we must not touch it.
+     */
+    public void healthFailed(ServerEntry watched) {
+        boolean[] removed = { false };
+        entries.compute(watched.id(), (k, current) -> {
+            if (current == watched) {
+                removed[0] = true;
+                return null;
+            }
+            return current; // entry has been replaced — don't touch it
+        });
+
+        // Always clean up the obsolete channel; harmless if already shut down.
+        watched.channel().shutdownNow();
+
+        if (removed[0]) {
+            watched.setStatus(ServerStatus.DEAD);
+            events.emit(RegistryEvent.statusChanged(watched.id(), ServerStatus.DEAD.name()));
+            events.emit(RegistryEvent.serverRemoved(watched.id()));
+            LOG.info("Marked DEAD + removed {}", watched.id());
+        } else {
+            LOG.info("Stale health failure for {} ignored — entry already replaced", watched.id());
         }
-        e.cancelHealth();
-        entries.remove(id);
-        e.channel().shutdownNow();
-        events.emit(RegistryEvent.serverRemoved(id));
-        LOG.info("Marked DEAD + removed {}", id);
     }
 
     public Collection<ServerEntry> snapshot() {
