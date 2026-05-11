@@ -16,9 +16,10 @@ public final class ServerApp {
 
     public static void main(String[] args) throws Exception {
         String serverId = envOrDefault("SERVER_ID", "server-local");
+        String role = envOrDefault("ROLE", "trading");
         int port = Integer.parseInt(envOrDefault("SERVER_PORT", "9101"));
         String advertisedHost = envOrDefault("ADVERTISED_HOST", defaultHostname());
-        String bffTarget = envOrDefault("BFF_REGISTRY", ""); // empty → skip registration
+        String brokerTarget = envOrDefault("BROKER_TARGET", "");
 
         HealthStatusManager health = new HealthStatusManager();
         AtomicReference<Server> serverRef = new AtomicReference<>();
@@ -36,22 +37,27 @@ public final class ServerApp {
 
         health.setStatus("", io.grpc.health.v1.HealthCheckResponse.ServingStatus.SERVING);
 
-        LOG.info("Backend '{}' listening on :{} (advertising as {}:{})",
-                serverId, port, advertisedHost, port);
+        LOG.info("Backend '{}' (role={}) listening on :{} (advertising {}:{})",
+                serverId, role, port, advertisedHost, port);
 
-        if (!bffTarget.isBlank()) {
-            Thread registrar = new Thread(
-                    () -> new RegistrationClient(bffTarget, serverId, advertisedHost, port).registerWithRetry(),
-                    "bff-registrar");
-            registrar.setDaemon(true);
-            registrar.start();
+        BrokerAnnouncer announcer = null;
+        if (!brokerTarget.isBlank()) {
+            announcer = new BrokerAnnouncer(brokerTarget, role, serverId, advertisedHost + ":" + port);
+            BrokerAnnouncer finalAnnouncer = announcer;
+            Thread t = new Thread(finalAnnouncer::announceWithRetry, "broker-announcer");
+            t.setDaemon(true);
+            t.start();
         } else {
-            LOG.info("BFF_REGISTRY env not set — skipping self-registration");
+            LOG.info("BROKER_TARGET not set — skipping announcement");
         }
 
+        BrokerAnnouncer finalAnnouncer = announcer;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOG.info("SIGTERM received — shutting down '{}'", serverId);
             health.setStatus("", io.grpc.health.v1.HealthCheckResponse.ServingStatus.NOT_SERVING);
+            if (finalAnnouncer != null) {
+                finalAnnouncer.withdraw();
+            }
             server.shutdown();
             try {
                 server.awaitTermination(10, TimeUnit.SECONDS);

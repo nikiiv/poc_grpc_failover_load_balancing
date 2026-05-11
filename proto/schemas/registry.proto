@@ -5,25 +5,9 @@ package poc.registry;
 option java_multiple_files = true;
 option java_package = "com.example.poc.registry";
 
-// Hosted by the BFF. Backends call this on startup to advertise themselves.
-service RegistryService {
-  rpc RegisterServer (RegisterRequest) returns (RegisterResponse);
-}
-
 // Hosted by each backend. BFF calls this when the operator clicks "Drain".
 service DrainService {
   rpc RequestDrain (DrainRequest) returns (DrainResponse);
-}
-
-message RegisterRequest {
-  string server_id = 1;
-  string host = 2;
-  int32 port = 3;
-}
-
-message RegisterResponse {
-  bool accepted = 1;
-  string message = 2;
 }
 
 message DrainRequest {

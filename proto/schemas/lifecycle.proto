@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package poc.lifecycle;
+
+option java_multiple_files = true;
+option java_package = "com.example.poc.lifecycle";
+
+// Pub/sub control plane. Every BFF and every backend announces itself once on boot.
+// Subscribers (typically BFFs) receive a snapshot followed by live JOINED/LEFT events
+// and filter locally by role.
+service LifecycleBroker {
+  rpc Announce (NodeInfo) returns (Ack);
+  rpc Withdraw (NodeRef) returns (Ack);
+  rpc Subscribe (SubscribeRequest) returns (stream LifecycleEvent);
+}
+
+enum NodeKind {
+  NODE_KIND_UNSPECIFIED = 0;
+  BFF = 1;
+  SERVER = 2;
+}
+
+message NodeInfo {
+  NodeKind kind = 1;
+  string role = 2;       // logical service: "trading", "billing", ...
+  string node_id = 3;    // unique within the cluster: "bff-t-1", "server-t-2"
+  string address = 4;    // host:port — where to reach this node
+}
+
+message NodeRef {
+  string node_id = 1;
+}
+
+message Ack {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message SubscribeRequest {
+  // The subscriber's own node_id. When the broker observes this subscription stream
+  // break, it treats the node as gone and emits a LEFT for it. Allows BFFs to detect
+  // peer-BFF death without active health checks.
+  string subscriber_id = 1;
+}
+
+message LifecycleEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    SNAPSHOT_ITEM = 1;   // streamed once per known node at subscribe time
+    SNAPSHOT_END = 2;    // sentinel marking end of snapshot
+    JOINED = 3;
+    LEFT = 4;
+  }
+  Type type = 1;
+  NodeInfo node = 2;     // populated for SNAPSHOT_ITEM, JOINED, LEFT (LEFT may have only node_id)
+}

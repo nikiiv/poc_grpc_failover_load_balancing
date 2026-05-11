@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import type { Role } from "../lib/api";
 import { sendCompute, sendEcho } from "../lib/api";
 
 const RATES = [0, 1, 4, 10] as const;
 
-export function RequestFirer({ disabled }: { disabled: boolean }) {
+export function RequestFirer({ role, disabled }: { role: Role; disabled: boolean }) {
   const [rps, setRps] = useState<(typeof RATES)[number]>(0);
   const [error, setError] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -13,17 +14,22 @@ export function RequestFirer({ disabled }: { disabled: boolean }) {
     if (rps === 0 || disabled) return;
     const periodMs = 1000 / rps;
     timerRef.current = window.setInterval(() => {
-      sendCompute(300).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      sendCompute(role, 300).catch((e) =>
+        setError(e instanceof Error ? e.message : String(e))
+      );
     }, periodMs);
     return () => {
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
-  }, [rps, disabled]);
+  }, [rps, disabled, role]);
+
+  // Reset auto-fire when role changes.
+  useEffect(() => setRps(0), [role]);
 
   async function fireOnce() {
     setError(null);
     try {
-      await sendEcho("hello");
+      await sendEcho(role, "hello");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -32,9 +38,7 @@ export function RequestFirer({ disabled }: { disabled: boolean }) {
   async function burst() {
     setError(null);
     const promises = [];
-    for (let i = 0; i < 20; i++) {
-      promises.push(sendCompute(300));
-    }
+    for (let i = 0; i < 20; i++) promises.push(sendCompute(role, 300));
     await Promise.allSettled(promises);
   }
 

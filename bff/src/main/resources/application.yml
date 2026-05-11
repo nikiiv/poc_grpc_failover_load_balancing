@@ -8,4 +8,7 @@ micronaut:
 
 poc:
   bff:
-    grpcPort: ${BFF_GRPC_PORT:7001}
+    role: ${ROLE:trading}
+    nodeId: ${NODE_ID:bff-local}
+    brokerTarget: ${BROKER_TARGET:127.0.0.1:7100}
+    advertisedAddress: ${ADVERTISED_ADDRESS:127.0.0.1:8080}

@@ -1,3 +1,5 @@
+export type Role = "trading" | "billing";
+
 export interface EchoReply {
   message: string;
   serverId: string;
@@ -20,41 +22,53 @@ export interface ServerView {
   lastSeenMs: number;
 }
 
-export async function sendEcho(message: string): Promise<EchoReply> {
-  const res = await fetch("/api/echo", {
+export interface KnownNode {
+  nodeId: string;
+  kind: "BFF" | "SERVER";
+  role: string;
+  address: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+}
+
+export interface Identity {
+  nodeId: string;
+  role: string;
+}
+
+function apiBase(role: Role): string {
+  return `/api/${role}`;
+}
+
+export async function sendEcho(role: Role, message: string): Promise<EchoReply> {
+  const res = await fetch(`${apiBase(role)}/echo`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
   });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   return (await res.json()) as EchoReply;
 }
 
-export async function sendCompute(workMs: number): Promise<ComputeReply> {
-  const res = await fetch("/api/compute", {
+export async function sendCompute(role: Role, workMs: number): Promise<ComputeReply> {
+  const res = await fetch(`${apiBase(role)}/compute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workMs }),
   });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   return (await res.json()) as ComputeReply;
 }
 
-export async function drainServer(id: string): Promise<void> {
-  const res = await fetch(`/api/servers/${encodeURIComponent(id)}/drain`, {
+export async function drainServer(role: Role, id: string): Promise<void> {
+  const res = await fetch(`${apiBase(role)}/servers/${encodeURIComponent(id)}/drain`, {
     method: "POST",
   });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
 }
 
-export async function listServers(): Promise<ServerView[]> {
-  const res = await fetch("/api/servers");
+export async function getIdentity(role: Role): Promise<Identity> {
+  const res = await fetch(`${apiBase(role)}/identity`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return (await res.json()) as ServerView[];
+  return (await res.json()) as Identity;
 }

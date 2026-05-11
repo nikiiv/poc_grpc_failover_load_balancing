@@ -1,18 +1,18 @@
 import { useState } from "react";
-import type { ServerView } from "../lib/api";
+import type { Role, ServerView } from "../lib/api";
 import { drainServer } from "../lib/api";
 import { serverColor } from "../lib/colors";
 
-export function ServersPanel({ servers }: { servers: ServerView[] }) {
+export function ServersPanel({ role, servers }: { role: Role; servers: ServerView[] }) {
   return (
     <section className="servers">
-      <h2>Servers ({servers.length})</h2>
+      <h2>{role} servers ({servers.length})</h2>
       {servers.length === 0 ? (
         <p className="empty">No backends registered yet.</p>
       ) : (
         <ul className="server-cards">
           {servers.map((s) => (
-            <ServerCard key={s.id} server={s} />
+            <ServerCard key={s.id} role={role} server={s} />
           ))}
         </ul>
       )}
@@ -20,16 +20,15 @@ export function ServersPanel({ servers }: { servers: ServerView[] }) {
   );
 }
 
-function ServerCard({ server: s }: { server: ServerView }) {
+function ServerCard({ role, server: s }: { role: Role; server: ServerView }) {
   const [draining, setDraining] = useState(false);
-
   const canDrain = s.status === "HEALTHY";
   const color = serverColor(s.id);
 
   async function onDrain() {
     setDraining(true);
     try {
-      await drainServer(s.id);
+      await drainServer(role, s.id);
     } catch {
       setDraining(false);
     }
@@ -54,7 +53,7 @@ function ServerCard({ server: s }: { server: ServerView }) {
           className="btn-drain"
           onClick={onDrain}
           disabled={!canDrain || draining}
-          title={canDrain ? "Stop routing new requests, finish in-flight, then exit" : "Only HEALTHY servers can be drained"}
+          title={canDrain ? "Drain (graceful retire)" : "Only HEALTHY servers can be drained"}
         >
           {draining ? "Draining…" : "Drain"}
         </button>

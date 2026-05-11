@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
-import type { ServerView } from "./api";
+import type { KnownNode, Role, ServerView } from "./api";
 
 export type RegistryEvent =
-  | { type: "snapshot"; servers: ServerView[] }
+  | { type: "snapshot"; servers: ServerView[]; nodes: KnownNode[] }
   | { type: "serverAdded"; server: ServerView }
   | { type: "serverRemoved"; id: string }
   | { type: "statusChanged"; id: string; status: ServerView["status"] }
-  | { type: "requestRouted"; id: string; handledAtMs: number; message: string };
+  | { type: "requestRouted"; id: string; handledAtMs: number; message: string }
+  | { type: "nodeJoined"; node: KnownNode }
+  | { type: "nodeLeft"; id: string };
 
 export interface RequestEntry {
   serverId: string;
@@ -17,24 +19,30 @@ export interface RequestEntry {
 export interface LiveState {
   servers: ServerView[];
   recent: RequestEntry[];
+  knownNodes: KnownNode[];
   connected: boolean;
-  /** Rolling window of request timestamps (ms epoch) for RPS calculation. */
   rpsWindow: number[];
 }
 
-const INITIAL: LiveState = { servers: [], recent: [], connected: false, rpsWindow: [] };
+const INITIAL: LiveState = {
+  servers: [],
+  recent: [],
+  knownNodes: [],
+  connected: false,
+  rpsWindow: [],
+};
 
 const RPS_WINDOW_MS = 5_000;
 
-export function useRegistryStream(): LiveState {
+export function useRegistryStream(role: Role): LiveState {
   const [state, setState] = useState<LiveState>(INITIAL);
 
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    setState(INITIAL); // reset on role change
+    const es = new EventSource(`/api/${role}/events`);
 
     es.onopen = () => setState((s) => ({ ...s, connected: true }));
     es.onerror = () => setState((s) => ({ ...s, connected: false }));
-
     es.onmessage = (ev) => {
       let evt: RegistryEvent;
       try {
@@ -46,7 +54,7 @@ export function useRegistryStream(): LiveState {
     };
 
     return () => es.close();
-  }, []);
+  }, [role]);
 
   return state;
 }
@@ -54,7 +62,7 @@ export function useRegistryStream(): LiveState {
 function applyEvent(prev: LiveState, evt: RegistryEvent): LiveState {
   switch (evt.type) {
     case "snapshot":
-      return { ...prev, servers: evt.servers };
+      return { ...prev, servers: evt.servers, knownNodes: evt.nodes ?? [] };
     case "serverAdded":
       if (prev.servers.some((s) => s.id === evt.server.id)) return prev;
       return {
@@ -86,6 +94,16 @@ function applyEvent(prev: LiveState, evt: RegistryEvent): LiveState {
         rpsWindow,
       };
     }
+    case "nodeJoined":
+      if (prev.knownNodes.some((n) => n.nodeId === evt.node.nodeId)) return prev;
+      return {
+        ...prev,
+        knownNodes: [...prev.knownNodes, evt.node].sort((a, b) =>
+          (a.role + a.nodeId).localeCompare(b.role + b.nodeId)
+        ),
+      };
+    case "nodeLeft":
+      return { ...prev, knownNodes: prev.knownNodes.filter((n) => n.nodeId !== evt.id) };
   }
 }
 

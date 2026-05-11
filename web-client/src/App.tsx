@@ -1,14 +1,27 @@
 import { useEffect, useState } from "react";
+import type { Role } from "./lib/api";
+import { getIdentity } from "./lib/api";
 import { rpsFromWindow, useRegistryStream } from "./lib/events";
 import { serverColor } from "./lib/colors";
 import { ServersPanel } from "./components/ServersPanel";
 import { TopBar } from "./components/TopBar";
 import { DistributionBar } from "./components/DistributionBar";
 import { RequestFirer } from "./components/RequestFirer";
+import { KnownNodesPanel } from "./components/KnownNodesPanel";
+import { RoleTabs } from "./components/RoleTabs";
 
 export default function App() {
-  const live = useRegistryStream();
-  // Tick once a second so RPS and timeAgo() refresh even with no new events.
+  const [role, setRole] = useState<Role>("trading");
+  const live = useRegistryStream(role);
+  const [bffNodeId, setBffNodeId] = useState<string | null>(null);
+
+  // Resolve which BFF we've actually landed on (nginx-side decision).
+  useEffect(() => {
+    setBffNodeId(null);
+    getIdentity(role).then((id) => setBffNodeId(id.nodeId)).catch(() => setBffNodeId(null));
+  }, [role]);
+
+  // Tick once a second so RPS / timeAgo refresh even with no new events.
   const [, setTick] = useState(0);
   useEffect(() => {
     const t = window.setInterval(() => setTick((n) => n + 1), 1000);
@@ -23,9 +36,11 @@ export default function App() {
       <header>
         <h1>gRPC Failover &amp; Load Balancing</h1>
         <p className="subtitle">
-          React → Micronaut BFF → N × gRPC backends · self-registration, Health.Watch, graceful drain
+          Pub/sub broker · multi-BFF · role-aware routing
         </p>
       </header>
+
+      <RoleTabs current={role} bffNodeId={bffNodeId} onChange={setRole} />
 
       <TopBar
         servers={live.servers}
@@ -36,9 +51,11 @@ export default function App() {
 
       <DistributionBar servers={live.servers} />
 
-      <ServersPanel servers={live.servers} />
+      <ServersPanel role={role} servers={live.servers} />
 
-      <RequestFirer disabled={healthyCount === 0} />
+      <RequestFirer role={role} disabled={healthyCount === 0} />
+
+      <KnownNodesPanel currentRole={role} nodes={live.knownNodes} />
 
       <section className="log">
         <h2>Recent requests</h2>

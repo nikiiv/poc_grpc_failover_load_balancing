@@ -1,7 +1,9 @@
 package com.example.poc.bff.registry;
 
+import com.example.poc.bff.broker.BrokerAnnouncer;
 import io.grpc.ManagedChannel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+import io.micronaut.context.annotation.Value;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Singleton;
 import org.slf4j.Logger;
@@ -19,16 +21,19 @@ public final class ServerRegistry {
 
     private final ConcurrentHashMap<String, ServerEntry> entries = new ConcurrentHashMap<>();
     private final EventBus events;
+    private final String brokerTarget;
 
-    public ServerRegistry(EventBus events) {
+    public ServerRegistry(EventBus events,
+                          @Value("${poc.bff.brokerTarget}") String brokerTarget) {
         this.events = events;
+        this.brokerTarget = brokerTarget;
     }
 
     /**
-     * Register (or RE-register) a backend. A second RegisterServer call for the same id
-     * means a NEW physical instance (e.g. container restart): the old entry's channel
-     * almost certainly points at a dead peer with a stale IP. So we always replace and
-     * rebuild the channel + watcher.
+     * Register (or RE-register) a backend. A second event for the same id means a NEW
+     * physical instance (e.g. container restart): the old entry's channel almost
+     * certainly points at a dead peer with a stale IP. So we always replace and rebuild
+     * the channel + watcher.
      */
     public ServerEntry register(String id, String host, int port) {
         ServerEntry[] previous = new ServerEntry[1];
@@ -45,12 +50,10 @@ public final class ServerRegistry {
             return new ServerEntry(id, host, port, ch);
         });
 
-        // Tear down the prior entry's resources outside the map's compute lock.
         if (previous[0] != null) {
             LOG.info("Replacing stale entry for {} (was {}:{})", id, previous[0].host(), previous[0].port());
             previous[0].cancelHealth();
             previous[0].channel().shutdownNow();
-            // No serverRemoved event — we go straight from old-card to new-card via serverAdded below.
         }
 
         HealthWatcher watcher = new HealthWatcher(fresh, this);
@@ -61,7 +64,7 @@ public final class ServerRegistry {
         return fresh;
     }
 
-    /** Called from {@link HealthWatcher#onNext}. Touch + update status on the watcher's own entry. */
+    /** Called from {@link HealthWatcher#onNext}. */
     public void markStatus(ServerEntry entry, ServerStatus status) {
         entry.touch();
         if (entry.setStatus(status)) {
@@ -72,8 +75,7 @@ public final class ServerRegistry {
     /**
      * Called from {@link HealthWatcher#onError}/{@link HealthWatcher#onCompleted}. Only
      * removes the entry if the registry still holds the SAME instance the watcher was
-     * watching — otherwise the entry has already been replaced by a newer registration
-     * and we must not touch it.
+     * watching. Also reports the death to the broker so peer BFFs can converge.
      */
     public void healthFailed(ServerEntry watched) {
         boolean[] removed = { false };
@@ -85,7 +87,6 @@ public final class ServerRegistry {
             return current; // entry has been replaced — don't touch it
         });
 
-        // Always clean up the obsolete channel; harmless if already shut down.
         watched.channel().shutdownNow();
 
         if (removed[0]) {
@@ -93,8 +94,23 @@ public final class ServerRegistry {
             events.emit(RegistryEvent.statusChanged(watched.id(), ServerStatus.DEAD.name()));
             events.emit(RegistryEvent.serverRemoved(watched.id()));
             LOG.info("Marked DEAD + removed {}", watched.id());
+            // Tell the broker so other BFFs converge quickly. Best-effort.
+            if (!brokerTarget.isBlank()) {
+                BrokerAnnouncer.withdrawNode(brokerTarget, watched.id());
+            }
         } else {
             LOG.info("Stale health failure for {} ignored — entry already replaced", watched.id());
+        }
+    }
+
+    /** Called from BrokerSubscriber on LEFT events. */
+    public void removeById(String id) {
+        ServerEntry e = entries.remove(id);
+        if (e != null) {
+            e.cancelHealth();
+            e.channel().shutdownNow();
+            events.emit(RegistryEvent.serverRemoved(id));
+            LOG.info("Removed {} (broker LEFT)", id);
         }
     }
 

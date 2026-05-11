@@ -1,6 +1,8 @@
 package com.example.poc.bff;
 
 import com.example.poc.bff.registry.EventBus;
+import com.example.poc.bff.registry.KnownNode;
+import com.example.poc.bff.registry.KnownNodesRegistry;
 import com.example.poc.bff.registry.RegistryEvent;
 import com.example.poc.bff.registry.ServerRegistry;
 import com.example.poc.bff.registry.ServerView;
@@ -19,10 +21,12 @@ public final class EventsController {
 
     private final EventBus events;
     private final ServerRegistry registry;
+    private final KnownNodesRegistry knownNodes;
 
-    public EventsController(EventBus events, ServerRegistry registry) {
+    public EventsController(EventBus events, ServerRegistry registry, KnownNodesRegistry knownNodes) {
         this.events = events;
         this.registry = registry;
+        this.knownNodes = knownNodes;
     }
 
     @Get
@@ -33,8 +37,11 @@ public final class EventsController {
                     .map(ServerView::of)
                     .sorted(Comparator.comparing(ServerView::id))
                     .toList();
+            List<KnownNode> known = knownNodes.snapshot().stream()
+                    .sorted(Comparator.comparing(KnownNode::nodeId))
+                    .toList();
             return Flux.concat(
-                    Flux.just(RegistryEvent.snapshot(snap)),
+                    Flux.just(RegistryEvent.snapshot(snap, known)),
                     events.asFlux()
             );
         }).map(Event::of);

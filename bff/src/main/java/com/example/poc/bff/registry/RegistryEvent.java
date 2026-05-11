@@ -17,25 +17,35 @@ public record RegistryEvent(
         @Nullable String id,
         @Nullable String status,
         @Nullable String message,
-        @Nullable Long handledAtMs) {
+        @Nullable Long handledAtMs,
+        @Nullable List<KnownNode> nodes,
+        @Nullable KnownNode node) {
 
-    public static RegistryEvent snapshot(List<ServerView> servers) {
-        return new RegistryEvent("snapshot", servers, null, null, null, null, null);
+    public static RegistryEvent snapshot(List<ServerView> servers, List<KnownNode> nodes) {
+        return new RegistryEvent("snapshot", servers, null, null, null, null, null, nodes, null);
     }
 
     public static RegistryEvent serverAdded(ServerView server) {
-        return new RegistryEvent("serverAdded", null, server, null, null, null, null);
+        return new RegistryEvent("serverAdded", null, server, null, null, null, null, null, null);
     }
 
     public static RegistryEvent serverRemoved(String id) {
-        return new RegistryEvent("serverRemoved", null, null, id, null, null, null);
+        return new RegistryEvent("serverRemoved", null, null, id, null, null, null, null, null);
     }
 
     public static RegistryEvent statusChanged(String id, String status) {
-        return new RegistryEvent("statusChanged", null, null, id, status, null, null);
+        return new RegistryEvent("statusChanged", null, null, id, status, null, null, null, null);
     }
 
     public static RegistryEvent requestRouted(String serverId, long handledAtMs, String message) {
-        return new RegistryEvent("requestRouted", null, null, serverId, null, message, handledAtMs);
+        return new RegistryEvent("requestRouted", null, null, serverId, null, message, handledAtMs, null, null);
+    }
+
+    public static RegistryEvent nodeJoined(KnownNode node) {
+        return new RegistryEvent("nodeJoined", null, null, null, null, null, null, null, node);
+    }
+
+    public static RegistryEvent nodeLeft(String id) {
+        return new RegistryEvent("nodeLeft", null, null, id, null, null, null, null, null);
     }
 }
