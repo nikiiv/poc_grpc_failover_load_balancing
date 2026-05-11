@@ -85,6 +85,21 @@ fire_echoes() {
     echo "  (${ok_count} ok, ${fail_count} non-200)"
 }
 
+# Hit /api/{role}/identity n times — nginx round-robins each fresh connection, so this
+# reveals which BFFs are currently receiving traffic.
+which_bffs() {
+    local role="$1" n="$2" code bff
+    for i in $(seq 1 "$n"); do
+        code=$(curl -sS -o "$TMP" -w "%{http_code}" "$BASE/api/$role/identity")
+        if [[ "$code" == "200" ]]; then
+            bff=$(python3 -c "import json,sys; print(json.load(sys.stdin)['nodeId'])" <"$TMP" 2>/dev/null)
+            echo "    via ${bff:-?}"
+        else
+            echo "    HTTP $code"
+        fi
+    done
+}
+
 # ── Step 0: bring it up ─────────────────────────────────────────────────────
 banner "Step 0  Bringing up the stack"
 say "1 broker + 4 BFFs + 4 servers + UI (10 containers)"
@@ -138,11 +153,39 @@ sleep 5
 list_servers trading
 pause
 
-# ── Step 6: kill a BFF ──────────────────────────────────────────────────────
-banner "Step 6  Kill a BFF — nginx should fail over transparently"
+# ── Step 6: which BFFs handle traffic right now ─────────────────────────────
+banner "Step 6  Which BFFs are handling traffic right now?"
+say "/api/trading/identity says which BFF answered. nginx round-robins, so 4 calls"
+say "should land on at least 2 different BFFs:"
+which_bffs trading 4
+pause
+
+# ── Step 7: spin up a third trading BFF ─────────────────────────────────────
+banner "Step 7  Spin up a third trading BFF live"
+say "OSS nginx insists every upstream hostname resolves at config-load time, so"
+say "bff-t-3 is initially COMMENTED OUT in nginx.conf. Production pattern:"
+say "  1. Start the container."
+say "  2. Edit nginx config (sed)."
+say "  3. nginx -s reload (zero-downtime config swap — no dropped connections)."
+echo
+run "$COMPOSE --profile extra up -d bff-t-3" 2>&1 | tail -3
+sleep 3
+say "Uncomment bff-t-3 in the live config and reload nginx:"
+run "$C exec ui sed -i 's|# server bff-t-3|server bff-t-3|' /etc/nginx/conf.d/default.conf"
+run "$C exec ui nginx -s reload"
+say "Waiting 8 s — nginx reload spawns new workers but lets old ones finish their"
+say "current connections first; new connections drift onto new workers gradually."
+sleep 8
+say "20 identity calls — distribution should now hit all 3 trading BFFs:"
+which_bffs trading 20 | awk '{print $NF}' | sort | uniq -c | awk '{printf "    %4d × %s\n", $1, $2}'
+ok "BFF added live; nginx reload is hot — no in-flight requests were dropped"
+pause
+
+# ── Step 8: kill a BFF ──────────────────────────────────────────────────────
+banner "Step 8  Kill a BFF — nginx should fail over transparently"
 say "Killing bff-t-1"
 run "$C kill bff-t-1"
-say "Firing 6 echoes — most/all should succeed via bff-t-2"
+say "Firing 6 echoes — most/all should succeed via bff-t-2 or bff-t-3"
 sleep 1
 fire_echoes trading 6
 warn "OSS nginx uses passive health checks — every fail_timeout (5 s) it"
@@ -150,8 +193,8 @@ warn "retries the dead BFF and one request pays the 2 s proxy_connect_timeout."
 warn "1 of N returning 504 here is expected; subsequent requests are fine."
 pause
 
-# ── Step 7: cluster topology view ───────────────────────────────────────────
-banner "Step 7  Cross-role observability"
+# ── Step 9: cluster topology view ───────────────────────────────────────────
+banner "Step 9  Cross-role observability"
 say "The trading BFF knows about the billing bucket too — just doesn't route to it."
 say "Trading BFF's known-nodes view:"
 list_known_nodes trading

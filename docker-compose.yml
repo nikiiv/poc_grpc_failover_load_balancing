@@ -36,6 +36,17 @@ services:
       BROKER_TARGET: broker:7100
       ADVERTISED_ADDRESS: bff-t-2:8080
 
+  bff-t-3:
+    <<: *bff-base
+    container_name: bff-t-3
+    hostname: bff-t-3
+    environment:
+      ROLE: trading
+      NODE_ID: bff-t-3
+      BROKER_TARGET: broker:7100
+      ADVERTISED_ADDRESS: bff-t-3:8080
+    profiles: [extra]
+
   server-t-1: &server-base
     image: poc/grpc-server:latest
     build:
