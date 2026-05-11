@@ -6,32 +6,33 @@ import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
-import java.time.Duration;
-
 @Singleton
 public final class EventBus {
 
     private static final Logger LOG = LoggerFactory.getLogger(EventBus.class);
 
-    // directBestEffort: live broadcast; no replay of events from before a subscriber connected.
-    // Subscribers receive a fresh `snapshot` at connection time (see EventsController).
+    // onBackpressureBuffer with generous capacity. directBestEffort dropped most events
+    // under bursty load. A buffered multicast handles bursts well; the side effect — the
+    // first subscriber sees a brief replay of pre-subscribe events — is harmless because
+    // EventsController also emits a fresh `snapshot` at subscribe time and the UI applies
+    // events idempotently.
     private final Sinks.Many<RegistryEvent> sink =
-            Sinks.many().multicast().directBestEffort();
-
-    // busy-loop briefly on FAIL_NON_SERIALIZED so concurrent emissions (from gRPC executor
-    // threads) don't drop events.
-    private final Sinks.EmitFailureHandler retryOnRace =
-            Sinks.EmitFailureHandler.busyLooping(Duration.ofMillis(50));
+            Sinks.many().multicast().onBackpressureBuffer(1024, false);
 
     public Flux<RegistryEvent> asFlux() {
         return sink.asFlux();
     }
 
-    public void emit(RegistryEvent event) {
-        try {
-            sink.emitNext(event, retryOnRace);
-        } catch (Exception e) {
-            LOG.warn("Failed to emit {}: {}", event.type(), e.toString());
+    /**
+     * Fire-and-forget event emission. {@code synchronized} avoids {@code FAIL_NON_SERIALIZED}
+     * races between concurrent emitters (gRPC executor threads + HTTP request threads).
+     * Uses {@code tryEmitNext} (never throws) so a slow SSE subscriber can't poison the
+     * controller's response — overflow / no-subscriber just drops the event.
+     */
+    public synchronized void emit(RegistryEvent event) {
+        Sinks.EmitResult r = sink.tryEmitNext(event);
+        if (r.isFailure() && r != Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER) {
+            LOG.debug("Dropped event {} ({})", event.type(), r);
         }
     }
 }
