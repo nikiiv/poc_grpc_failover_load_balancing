@@ -1,0 +1,25 @@
+# Build outputs
+**/.gradle
+**/build
+**/node_modules
+**/dist
+**/.vite
+**/*.tsbuildinfo
+
+# VCS / IDE
+.git
+.gitignore
+.idea
+.vscode
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+**/*.log
+
+# Local-only state
+bin/
+README.md

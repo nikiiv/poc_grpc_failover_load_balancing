@@ -1,0 +1,63 @@
+services:
+  bff:
+    image: poc/bff:latest
+    build:
+      context: .
+      dockerfile: bff/Dockerfile
+    container_name: bff
+    hostname: bff
+    ports:
+      - "8080:8080"
+      - "7001:7001"
+    environment:
+      BFF_GRPC_PORT: 7001
+    networks: [poc-net]
+
+  ui:
+    image: poc/ui:latest
+    build:
+      context: .
+      dockerfile: web-client/Dockerfile
+    container_name: ui
+    hostname: ui
+    ports:
+      - "5173:80"
+    depends_on: [bff]
+    networks: [poc-net]
+
+  server-a: &server-base
+    image: poc/grpc-server:latest
+    build:
+      context: .
+      dockerfile: grpc-server/Dockerfile
+    container_name: server-a
+    hostname: server-a
+    environment:
+      SERVER_ID: server-a
+      SERVER_PORT: 9101
+      BFF_REGISTRY: bff:7001
+    depends_on: [bff]
+    networks: [poc-net]
+
+  server-b:
+    <<: *server-base
+    container_name: server-b
+    hostname: server-b
+    environment:
+      SERVER_ID: server-b
+      SERVER_PORT: 9101
+      BFF_REGISTRY: bff:7001
+
+  server-c:
+    <<: *server-base
+    container_name: server-c
+    hostname: server-c
+    environment:
+      SERVER_ID: server-c
+      SERVER_PORT: 9101
+      BFF_REGISTRY: bff:7001
+    profiles: [extra]
+
+networks:
+  poc-net:
+    name: poc-net

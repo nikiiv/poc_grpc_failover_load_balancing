@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Container runtime wrapper: picks docker if its daemon is reachable, otherwise podman.
+set -euo pipefail
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  exec docker "$@"
+elif command -v podman >/dev/null 2>&1; then
+  exec podman "$@"
+else
+  echo "Neither docker nor podman found (or docker daemon not running)." >&2
+  exit 1
+fi

@@ -1,0 +1,11 @@
+micronaut:
+  application:
+    name: poc-bff
+  server:
+    port: 8080
+    cors:
+      enabled: true
+
+poc:
+  bff:
+    grpcPort: ${BFF_GRPC_PORT:7001}

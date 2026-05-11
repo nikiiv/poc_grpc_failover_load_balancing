@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+
+# JVM
+out/
+*.class
+hs_err_pid*
+replay_pid*
+
+# Node / TypeScript
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

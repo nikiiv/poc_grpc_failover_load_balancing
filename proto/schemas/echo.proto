@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package poc.echo;
+
+option java_multiple_files = true;
+option java_package = "com.example.poc.echo";
+
+service EchoService {
+  rpc Echo (EchoRequest) returns (EchoResponse);
+  rpc Compute (ComputeRequest) returns (ComputeResponse);
+  rpc GetServerInfo (Empty) returns (ServerInfo);
+}
+
+message Empty {}
+
+message EchoRequest {
+  string message = 1;
+  int32 client_seq = 2;
+}
+
+message EchoResponse {
+  string message = 1;
+  string server_id = 2;
+  int64 handled_at_ms = 3;
+}
+
+message ComputeRequest {
+  int32 work_ms = 1;
+}
+
+message ComputeResponse {
+  string server_id = 1;
+  int64 elapsed_ms = 2;
+}
+
+message ServerInfo {
+  string server_id = 1;
+  int32 port = 2;
+  int64 started_at_ms = 3;
+  int64 handled_total = 4;
+}
