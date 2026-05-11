@@ -60,8 +60,11 @@ A two-to-three-minute live walk-through:
 3. **Hard kill a server.** Run `./bin/c kill server-t-1`. Within a second, the red flash; the card slides out. New requests now all go to the survivor. **No errors are visible to the user.**
 4. **Add capacity.** Run `./bin/compose --profile extra up -d server-t-3`. A new green card slides in. Traffic immediately starts routing there.
 5. **Graceful drain.** Click "Drain" on a card. Amber pill, in-flight counter ticking down, then the card slides out calmly. Quite a different visual from the kill — and a different *narrative* about how the system was retired.
-6. **Kill a BFF.** Run `./bin/c kill bff-t-1`. Continue clicking buttons in the UI — every request still succeeds. nginx transparently routes through `bff-t-2`. The first request after the kill pays a one-time 2-second connect-timeout penalty; everything else is instant.
-7. **Show the second bucket.** Switch to the **billing** tab. Different servers (`server-b-1`, `server-b-2`), routed through different BFFs (`bff-b-1`, `bff-b-2`). Notice the "cluster topology" panel: the billing BFF knows about every trading node too — just doesn't route to them.
+6. **Add a third BFF live.** Run `./bin/compose --profile extra up -d bff-t-3`, then `./bin/c exec ui sed -i 's|# server bff-t-3|server bff-t-3|' /etc/nginx/conf.d/default.conf && ./bin/c exec ui nginx -s reload`. Subsequent requests fan out across three BFFs — the BFF tier scales just like the backend tier did in step 4. (Why the sed+reload? See *adding upstreams to nginx live* below.)
+7. **Kill a BFF.** Run `./bin/c kill bff-t-1`. Continue clicking buttons in the UI — every request still succeeds. nginx transparently routes through `bff-t-2` or `bff-t-3`. The first request after the kill pays a one-time 2-second connect-timeout penalty; everything else is instant.
+8. **Show the second bucket.** Switch to the **billing** tab. Different servers (`server-b-1`, `server-b-2`), routed through different BFFs (`bff-b-1`, `bff-b-2`). Notice the "cluster topology" panel: the billing BFF knows about every trading node too — just doesn't route to them.
+
+> **Tip:** `./bin/demo` runs all of this for you (interactive, pauses between steps). `./bin/demo --auto` is the non-interactive smoke variant. Both tear down at the end.
 
 ---
 
@@ -290,7 +293,8 @@ If a request arrives and no server is healthy, the controller returns HTTP 503.
 upstream trading_bff {
     server bff-t-1:8080 max_fails=1 fail_timeout=5s;
     server bff-t-2:8080 max_fails=1 fail_timeout=5s;
-    keepalive 16;
+    # server bff-t-3:8080 max_fails=1 fail_timeout=5s;   # uncomment + reload to add
+    # (no `keepalive N` — see below)
 }
 
 upstream billing_bff { ... }
@@ -311,6 +315,28 @@ Key choices:
 - **Path-prefix routing.** Requests come in as `/api/trading/echo`; nginx strips the `/trading` prefix before forwarding. The BFF stays at its native `/api/echo` regardless of role.
 - **Passive health checks** (`max_fails=1 fail_timeout=5s`). nginx OSS doesn't actively poll upstreams; instead it discovers failures on real requests and marks the upstream unavailable for 5 seconds after the first failure. With continuous UI traffic this gives ~ms-level failover; with idle traffic, the first request after a BFF dies pays a one-time `proxy_connect_timeout` penalty.
 - **`proxy_buffering off` + long `proxy_read_timeout`** for the SSE stream.
+- **No `keepalive N` on the upstream block.** With it, nginx biases new connections toward upstreams it already has warm connections to — which makes a newly-added BFF underused for a while. For the POC we prefer clean per-request round-robin over a few ms of saved TCP handshake.
+
+#### Adding upstreams to nginx live
+
+OSS nginx insists every upstream hostname resolves at config-load time. `bff-t-3` doesn't exist on the Docker network until you `./bin/compose --profile extra up -d bff-t-3`, so listing it active in the upstream block at boot makes nginx refuse to start (`host not found in upstream`).
+
+Production-realistic pattern: keep the line commented out, then edit + reload when the container comes online.
+
+```bash
+./bin/compose --profile extra up -d bff-t-3
+./bin/c exec ui sed -i 's|# server bff-t-3|server bff-t-3|' /etc/nginx/conf.d/default.conf
+./bin/c exec ui nginx -s reload
+```
+
+`nginx -s reload` is a zero-downtime config swap — the master spawns new workers with the new config; old workers finish their current connections then exit. In-flight requests aren't dropped. Note that traffic distribution takes a few seconds to even out as new connections drift onto the new worker generation.
+
+Alternatives that avoid the edit-and-reload entirely:
+- **Traefik** with Docker labels — new containers register themselves; the front door updates automatically.
+- **nginx Plus** with `resolver` + `server ... resolve;` directives — DNS is consulted at request time, not config-load.
+- **Envoy** or a service mesh — full dynamic discovery via xDS.
+
+This POC uses OSS nginx + edit-and-reload because it's the most honest representation of what most teams actually run in production.
 
 ### Graceful drain — the full path
 
@@ -458,12 +484,24 @@ The wrappers in `bin/c` and `bin/compose` auto-detect `docker` (if its daemon is
 Demo commands:
 
 ```bash
-./bin/compose --profile extra up -d server-t-3     # spawn a third trading backend live
+./bin/demo                                         # narrated walk-through (Enter between steps)
+./bin/demo --auto                                  # same but non-interactive (smoke test)
+
+./bin/compose --profile extra up -d server-t-3     # add a third trading backend live
+./bin/compose --profile extra up -d bff-t-3        # add a third trading BFF live (also needs nginx reload — see below)
 ./bin/c kill server-t-1                            # SIGKILL — abrupt server failure
 ./bin/c stop server-t-1                            # SIGTERM — fires the shutdown hook
 ./bin/c start server-t-1                           # restart a stopped container
 ./bin/c kill bff-t-1                               # take down a BFF — nginx fails over
-./bin/compose down
+./bin/compose down                                 # stop everything
+./bin/compose --profile extra down                 # ...including the extra-profile containers
+```
+
+To wire `bff-t-3` into nginx after starting it:
+
+```bash
+./bin/c exec ui sed -i 's|# server bff-t-3|server bff-t-3|' /etc/nginx/conf.d/default.conf
+./bin/c exec ui nginx -s reload
 ```
 
 On Mac under Podman, first time:
@@ -520,3 +558,4 @@ Note: **7100, not 7000** — macOS Control Center / AirPlay Receiver binds 7000 
 - Retry / backoff on the `EchoStub.echo` call — single attempt; failure returns 502.
 - Authentication / authorization on the broker — anyone reachable can announce or withdraw a node.
 - Per-service health (`grpc.health.v1.Health` supports watching individual service names) — we only use the overall `""` service watch.
+- Fully-automatic BFF discovery in nginx — OSS nginx needs an edit-and-reload to add a new upstream. Traefik / nginx Plus / Envoy fix this; using one of those would be a future enhancement.
