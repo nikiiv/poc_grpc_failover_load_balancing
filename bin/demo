@@ -102,16 +102,27 @@ which_bffs() {
 
 # ── Step 0: bring it up ─────────────────────────────────────────────────────
 banner "Step 0  Bringing up the stack"
-say "1 broker + 4 BFFs + 4 servers + UI (10 containers)"
+say "1 broker + 1 Consul + 4 BFFs + 4 servers + UI (11 containers)"
 run "$COMPOSE up --build -d" 2>&1 | tail -3
 say "Waiting 8 s for registrations to settle..."
 sleep 8
 
 # ── Step 1: verify both buckets are populated ───────────────────────────────
-banner "Step 1  Both buckets self-registered via the broker"
-say "Trading bucket:"; list_servers trading
+banner "Step 1  Both buckets self-registered via the broker AND with Consul"
+say "Trading bucket (from a trading BFF, via the broker):"; list_servers trading
 say "Billing bucket:"; list_servers billing
-say "Open the UI in a browser: ${BOLD}$BASE${RESET}"
+echo
+say "Consul has the same cluster picture via an independent registration path:"
+curl -sS http://127.0.0.1:8500/v1/agent/services 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for v in sorted(data.values(), key=lambda x: (x['Service'], x['ID'])):
+    print(f\"    {v['Service']:14} {v['ID']:14} {','.join(v['Tags']):10} {v['Address']}:{v['Port']}\")
+"
+echo
+say "Open both UIs in a browser:"
+say "  ${BOLD}$BASE${RESET}        — app dashboard"
+say "  ${BOLD}http://127.0.0.1:8500/ui/${RESET} — Consul (independent health view)"
 pause
 
 # ── Step 2: round-robin ─────────────────────────────────────────────────────

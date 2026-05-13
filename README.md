@@ -539,12 +539,38 @@ All paths are role-prefixed; replace `{role}` with `trading` or `billing`.
 | `POST` | `/api/{role}/servers/{id}/drain` | — | Tells a backend to drain gracefully |
 | `GET` | `/api/{role}/events` | — | SSE stream of registry + topology events |
 
+## Consul as a parallel health-check plane
+
+Alongside the broker, every backend and every BFF also registers itself with a **Consul** dev-mode container. Consul probes each registered service independently:
+
+| Tier | Consul check | Interval | Auto-deregister after |
+|---|---|---|---|
+| Backends | `Check.GRPC: server-x:9101` (uses the same `grpc.health.v1.Health` we already expose) | 2 s | 30 s of failures |
+| BFFs | `Check.HTTP: http://bff-x:8080/api/internal/health` | 2 s | 30 s of failures |
+
+This layer is **purely additive** in this slice — routing decisions still go through the broker + per-BFF `Health.Watch`. Consul gives a second, independent view of cluster health with a built-in UI at <http://localhost:8500/ui/>.
+
+Why have both? Two reasons:
+
+1. **A safety net at a different layer.** If our broker were to misbehave, Consul's view still shows ground truth via active probes.
+2. **A natural migration path.** Future slices can incrementally route via Consul's catalog (BFF watch loops, `consul-template` for nginx, ACLs/mTLS via Consul Connect) until the broker is no longer needed.
+
+Code is in [`grpc-server/.../ConsulRegistrar.java`](grpc-server/src/main/java/com/example/poc/server/ConsulRegistrar.java) and [`bff/.../consul/ConsulRegistrar.java`](bff/src/main/java/com/example/poc/bff/consul/ConsulRegistrar.java). Both use Java's stdlib `java.net.http.HttpClient` — no new dependencies — and `PUT /v1/agent/service/register` / `PUT /v1/agent/service/deregister/{id}` on the Consul HTTP API.
+
+Quick check:
+
+```bash
+curl -s http://127.0.0.1:8500/v1/health/service/echo-server | jq '.[] | {id: .Service.ID, checks: [.Checks[] | {name, status}]}'
+```
+
 ## Ports
 
 | Service | Port | Where exposed |
 |---|---|---|
 | UI / front door | 5173 | Host → nginx :80 in the `ui` container |
 | Broker | 7100 | Host → `broker` (for `gradle start_*` from outside compose) |
+| Consul HTTP + UI | 8500 | Host → `consul` |
+| Consul DNS | 8600/udp | Host → `consul` (optional) |
 | BFFs HTTP | 8080 | Internal only — fronted by nginx |
 | Backends gRPC | 9101 | Internal only |
 
@@ -559,3 +585,5 @@ Note: **7100, not 7000** — macOS Control Center / AirPlay Receiver binds 7000 
 - Authentication / authorization on the broker — anyone reachable can announce or withdraw a node.
 - Per-service health (`grpc.health.v1.Health` supports watching individual service names) — we only use the overall `""` service watch.
 - Fully-automatic BFF discovery in nginx — OSS nginx needs an edit-and-reload to add a new upstream. Traefik / nginx Plus / Envoy fix this; using one of those would be a future enhancement.
+- Consul-driven *routing* — backends and BFFs register with Consul today, but BFFs still route via the broker. A future slice can replace the broker subscriber with a Consul blocking-query watch loop, and add `consul-template` to drive nginx upstreams.
+- Consul HA — single-node dev mode. Production would run 3+ Consul servers with Raft.

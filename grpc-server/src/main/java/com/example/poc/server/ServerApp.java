@@ -20,6 +20,7 @@ public final class ServerApp {
         int port = Integer.parseInt(envOrDefault("SERVER_PORT", "9101"));
         String advertisedHost = envOrDefault("ADVERTISED_HOST", defaultHostname());
         String brokerTarget = envOrDefault("BROKER_TARGET", "");
+        String consulTarget = envOrDefault("CONSUL_TARGET", "");
 
         HealthStatusManager health = new HealthStatusManager();
         AtomicReference<Server> serverRef = new AtomicReference<>();
@@ -48,16 +49,27 @@ public final class ServerApp {
             t.setDaemon(true);
             t.start();
         } else {
-            LOG.info("BROKER_TARGET not set — skipping announcement");
+            LOG.info("BROKER_TARGET not set — skipping broker announcement");
+        }
+
+        ConsulRegistrar consul = null;
+        if (!consulTarget.isBlank()) {
+            consul = new ConsulRegistrar(consulTarget, serverId, "echo-server", role, advertisedHost, port);
+            ConsulRegistrar finalConsul = consul;
+            Thread t = new Thread(finalConsul::registerWithRetry, "consul-registrar");
+            t.setDaemon(true);
+            t.start();
+        } else {
+            LOG.info("CONSUL_TARGET not set — skipping Consul registration");
         }
 
         BrokerAnnouncer finalAnnouncer = announcer;
+        ConsulRegistrar finalConsul = consul;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOG.info("SIGTERM received — shutting down '{}'", serverId);
             health.setStatus("", io.grpc.health.v1.HealthCheckResponse.ServingStatus.NOT_SERVING);
-            if (finalAnnouncer != null) {
-                finalAnnouncer.withdraw();
-            }
+            if (finalAnnouncer != null) finalAnnouncer.withdraw();
+            if (finalConsul != null)    finalConsul.deregister();
             server.shutdown();
             try {
                 server.awaitTermination(10, TimeUnit.SECONDS);

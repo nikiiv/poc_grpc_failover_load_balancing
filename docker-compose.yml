@@ -10,6 +10,18 @@ services:
       - "7100:7100"
     networks: [poc-net]
 
+  consul:
+    # Dev mode: in-memory, single node, no auth. Perfect for the POC.
+    # UI on http://localhost:8500/ui/  · HTTP API on :8500  · DNS on :8600.
+    image: docker.io/hashicorp/consul:1.20
+    container_name: consul
+    hostname: consul
+    command: agent -dev -client=0.0.0.0 -log-level=INFO
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    networks: [poc-net]
+
   # ─── Trading bucket ───
   bff-t-1: &bff-base
     image: poc/bff:latest
@@ -22,8 +34,9 @@ services:
       ROLE: trading
       NODE_ID: bff-t-1
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
       ADVERTISED_ADDRESS: bff-t-1:8080
-    depends_on: [broker]
+    depends_on: [broker, consul]
     networks: [poc-net]
 
   bff-t-2:
@@ -34,6 +47,7 @@ services:
       ROLE: trading
       NODE_ID: bff-t-2
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
       ADVERTISED_ADDRESS: bff-t-2:8080
 
   bff-t-3:
@@ -44,6 +58,7 @@ services:
       ROLE: trading
       NODE_ID: bff-t-3
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
       ADVERTISED_ADDRESS: bff-t-3:8080
     profiles: [extra]
 
@@ -59,7 +74,8 @@ services:
       SERVER_PORT: 9101
       ROLE: trading
       BROKER_TARGET: broker:7100
-    depends_on: [broker]
+      CONSUL_TARGET: consul:8500
+    depends_on: [broker, consul]
     networks: [poc-net]
 
   server-t-2:
@@ -71,6 +87,7 @@ services:
       SERVER_PORT: 9101
       ROLE: trading
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
 
   server-t-3:
     <<: *server-base
@@ -81,6 +98,7 @@ services:
       SERVER_PORT: 9101
       ROLE: trading
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
     profiles: [extra]
 
   # ─── Billing bucket ───
@@ -92,6 +110,7 @@ services:
       ROLE: billing
       NODE_ID: bff-b-1
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
       ADVERTISED_ADDRESS: bff-b-1:8080
 
   bff-b-2:
@@ -102,6 +121,7 @@ services:
       ROLE: billing
       NODE_ID: bff-b-2
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
       ADVERTISED_ADDRESS: bff-b-2:8080
 
   server-b-1:
@@ -113,6 +133,7 @@ services:
       SERVER_PORT: 9101
       ROLE: billing
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
 
   server-b-2:
     <<: *server-base
@@ -123,6 +144,7 @@ services:
       SERVER_PORT: 9101
       ROLE: billing
       BROKER_TARGET: broker:7100
+      CONSUL_TARGET: consul:8500
 
   ui:
     image: poc/ui:latest

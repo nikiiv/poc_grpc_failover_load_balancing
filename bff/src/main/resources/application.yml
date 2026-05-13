@@ -11,4 +11,5 @@ poc:
     role: ${ROLE:trading}
     nodeId: ${NODE_ID:bff-local}
     brokerTarget: ${BROKER_TARGET:127.0.0.1:7100}
+    consulTarget: ${CONSUL_TARGET:}
     advertisedAddress: ${ADVERTISED_ADDRESS:127.0.0.1:8080}
