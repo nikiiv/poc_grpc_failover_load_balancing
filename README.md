@@ -14,6 +14,17 @@ Runs under either **Docker** or **Podman** with auto-detection; the same image s
 # open http://localhost:8500/ui/    — Consul health dashboard
 ```
 
+Then try breaking it:
+
+```bash
+./bin/c kill server-t-1                          # SIGKILL — backend gone in ~1 s
+./bin/c kill bff-t-1                             # SIGKILL — nginx fails over silently
+./bin/c restart broker                           # broker re-seeds from Consul on boot
+./bin/compose --profile extra up -d server-t-3   # add a backend live
+```
+
+For the guided tour and the test suite:
+
 ```bash
 ./bin/demo --auto    # narrated walk-through of every key feature, ~3 min
 ./bin/test           # run the 20-test integration suite, ~4 min
@@ -32,28 +43,45 @@ Runs under either **Docker** or **Podman** with auto-detection; the same image s
 ## Quick architecture sketch
 
 ```
-React/Vite UI ──── nginx (front door) ─┬──► trading BFFs ──► trading backends
-                                       └──► billing BFFs ──► billing backends
-                                              │  ▲
-                                       Announce/Subscribe
-                                              │  │
-                                       ┌──────▼──┴───┐
-                                       │  Lifecycle  │
-                                       │   Broker    │◄── bootstraps from ┐
-                                       └─────────────┘                    │
-                                                                    ┌─────▼─────┐
-                                       (all nodes also              │  Consul   │
-                                        register with) ────────────►│ (probes)  │
-                                                                    └───────────┘
+                       React/Vite UI  (:5173)
+                              │
+                              ▼
+                       nginx (front door)
+                       /api/trading/* ─┐    /api/billing/* ─┐
+                                       │                    │
+                                       ▼                    ▼
+                              ┌────────────────┐   ┌────────────────┐
+                              │  trading BFFs  │   │  billing BFFs  │
+                              │  bff-t-1 / -2  │   │  bff-b-1 / -2  │
+                              └─┬─┬──────┬─────┘   └─┬─┬──────┬─────┘
+                                │ │      │           │ │      │
+                       gRPC echo│ │ ann/sub          │ │ann/sub
+                                ▼ │      ▼           ▼ │      ▼
+                  ┌─────────────────┐  ┌──────────────────────┐
+                  │ trading backends │  │  Lifecycle Broker    │
+                  │ server-t-1 / -2  │  │     (:7100)          │
+                  │ billing backends │  │  pub/sub control     │
+                  │ server-b-1 / -2  │  │  plane               │
+                  └────────┬─────────┘  └──────┬───────────────┘
+                           │                   │
+                           │ register +        │ bootstrap on start
+                           │ health-probed by  │ + parallel probes
+                           ▼                   ▼
+                       ┌──────────────────────────┐
+                       │       Consul  (:8500)    │
+                       │  catalog + active probes │
+                       └──────────────────────────┘
 ```
 
-The broker drives **routing**; Consul provides **independent observability** and is the source of truth that the broker rebuilds itself from on restart.
+- The **broker drives routing**: BFFs `Subscribe` to its event stream and use the resulting view to build their per-backend channels.
+- **Consul is the durable source of truth**: every backend and BFF registers with it on boot; the broker re-seeds from Consul whenever it restarts, so the cluster view survives a cold reboot without anyone re-announcing.
+- The broker layer is *fast and gRPC-native* (streaming, sub-second propagation); the Consul layer is *resilient and authoritative* (HTTP, active probes, restart-survivable). They complement each other.
 
 ## Status
 
-- Branch: `consul_for_health` (4 commits ahead of `main`)
-- Test suite: 20 / 20 passing on cold start
-- Containers: 11 (broker, Consul, 2 trading BFFs, 2 trading backends, 2 billing BFFs, 2 billing backends, UI)
+- Branch: `consul_for_health`
+- Test suite: 20 / 20 passing on cold start (see [TESTS.md](TESTS.md))
+- Containers: 11 — broker, Consul, 2 × trading BFFs, 2 × trading backends, 2 × billing BFFs, 2 × billing backends, UI
 
 ## Not production-ready
 
