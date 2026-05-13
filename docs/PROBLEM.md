@@ -47,7 +47,7 @@ A self-healing system for gRPC services that runs **redundant** at every layer:
 
 A two-to-three-minute live walk-through:
 
-1. **Start.** Six application containers come up: the broker, two trading BFFs, two trading servers, and the UI. The UI shows two green cards for the trading bucket. Click "Send 1 Echo" — the response shows which server handled it and which BFF nginx routed through.
+1. **Start.** Eleven containers come up: the broker, Consul, two trading BFFs, two trading backends, two billing BFFs, two billing backends, and the `ui` container (nginx — serves the React bundle *and* fronts both BFF pools at `/api/{role}/*`). The UI shows two green cards for the trading bucket. Click "Send 1 Echo" — the response shows which server handled it and which BFF nginx routed through.
 2. **Burst.** Click "Burst 20 × Compute" — twenty requests fire at once and the distribution bar fills in proportionally. Round-robin in action.
 3. **Hard kill a server.** Run `./bin/c kill server-t-1`. Within a second, the red flash; the card slides out. New requests now all go to the survivor. **No errors are visible to the user.**
 4. **Add capacity.** Run `./bin/compose --profile extra up -d server-t-3`. A new green card slides in. Traffic immediately starts routing there.

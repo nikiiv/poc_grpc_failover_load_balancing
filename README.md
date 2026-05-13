@@ -79,9 +79,8 @@ For the guided tour and the test suite:
 
 ## Status
 
-- Branch: `consul_for_health`
 - Test suite: 20 / 20 passing on cold start (see [TESTS.md](TESTS.md))
-- Containers: 11 — broker, Consul, 2 × trading BFFs, 2 × trading backends, 2 × billing BFFs, 2 × billing backends, UI
+- Containers: 11 — broker, Consul, 2 × trading BFFs, 2 × trading backends, 2 × billing BFFs, 2 × billing backends, and a single `ui` container that runs **nginx** (serves the React bundle *and* fronts the BFFs at `/api/{role}/*`)
 
 ## Not production-ready
 
