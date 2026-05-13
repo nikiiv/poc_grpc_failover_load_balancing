@@ -101,11 +101,11 @@ Internal (not exposed through nginx, used by Consul probes):
 
 | Service | Port | Where exposed |
 |---|---|---|
-| UI / front door | 5173 | Host → nginx :80 in the `ui` container |
+| UI + API front door (single nginx) | 5173 | Host → nginx :80 in the `ui` container — serves the React bundle on `/` and reverse-proxies `/api/{role}/*` to the BFFs |
 | Broker | 7100 | Host → `broker` (for `gradle start_*` from outside compose) |
 | Consul HTTP + UI | 8500 | Host → `consul` |
 | Consul DNS | 8600/udp | Host → `consul` (optional) |
-| BFFs HTTP | 8080 | Internal only — fronted by nginx |
+| BFFs HTTP | 8080 | Internal only — fronted by the `ui` nginx |
 | Backends gRPC | 9101 | Internal only |
 
 Note: **7100, not 7000** — macOS Control Center / AirPlay Receiver binds 7000 by default.

@@ -43,36 +43,43 @@ For the guided tour and the test suite:
 ## Quick architecture sketch
 
 ```
-                       React/Vite UI  (:5173)
-                              │
-                              ▼
-                       nginx (front door)
-                       /api/trading/* ─┐    /api/billing/* ─┐
-                                       │                    │
-                                       ▼                    ▼
-                              ┌────────────────┐   ┌────────────────┐
-                              │  trading BFFs  │   │  billing BFFs  │
-                              │  bff-t-1 / -2  │   │  bff-b-1 / -2  │
-                              └─┬─┬──────┬─────┘   └─┬─┬──────┬─────┘
-                                │ │      │           │ │      │
-                       gRPC echo│ │ ann/sub          │ │ann/sub
-                                ▼ │      ▼           ▼ │      ▼
-                  ┌─────────────────┐  ┌──────────────────────┐
-                  │ trading backends │  │  Lifecycle Broker    │
-                  │ server-t-1 / -2  │  │     (:7100)          │
-                  │ billing backends │  │  pub/sub control     │
-                  │ server-b-1 / -2  │  │  plane               │
-                  └────────┬─────────┘  └──────┬───────────────┘
-                           │                   │
-                           │ register +        │ bootstrap on start
-                           │ health-probed by  │ + parallel probes
-                           ▼                   ▼
-                       ┌──────────────────────────┐
-                       │       Consul  (:8500)    │
-                       │  catalog + active probes │
-                       └──────────────────────────┘
+              Browser (your laptop)
+                     │
+                     │ http://localhost:5173/        ← SPA bundle
+                     │ http://localhost:5173/api/…   ← API calls
+                     ▼
+              ┌──────────────────────────────┐
+              │  `ui` container — nginx :80  │   ← serves the built React bundle
+              │                              │     AND reverse-proxies /api/*
+              │  /api/trading/* ─┐           │
+              │  /api/billing/* ─┤           │
+              └──────────────────┼───────────┘
+                                 │
+                                 ▼
+                    ┌────────────────┐   ┌────────────────┐
+                    │  trading BFFs  │   │  billing BFFs  │
+                    │  bff-t-1 / -2  │   │  bff-b-1 / -2  │
+                    └─┬─┬──────┬─────┘   └─┬─┬──────┬─────┘
+                      │ │      │           │ │      │
+              gRPC echo│ │ ann/sub          │ │ann/sub
+                      ▼ │      ▼           ▼ │      ▼
+        ┌─────────────────┐  ┌──────────────────────┐
+        │ trading backends │  │  Lifecycle Broker    │
+        │ server-t-1 / -2  │  │     (:7100)          │
+        │ billing backends │  │  pub/sub control     │
+        │ server-b-1 / -2  │  │  plane               │
+        └────────┬─────────┘  └──────┬───────────────┘
+                 │                   │
+                 │ register +        │ bootstrap on start
+                 │ health-probed by  │ + parallel probes
+                 ▼                   ▼
+             ┌──────────────────────────┐
+             │       Consul  (:8500)    │
+             │  catalog + active probes │
+             └──────────────────────────┘
 ```
 
+- **One container, two jobs.** The browser loads the React SPA from the `ui` container's nginx, then makes `/api/*` calls *to the same nginx*, which reverse-proxies them to the BFFs. No separate "static-files server" — nginx does both. Details in [docs/ARCHITECTURE.md § What serves the UI to the browser](docs/ARCHITECTURE.md#what-serves-the-ui-to-the-browser).
 - The **broker drives routing**: BFFs `Subscribe` to its event stream and use the resulting view to build their per-backend channels.
 - **Consul is the durable source of truth**: every backend and BFF registers with it on boot; the broker re-seeds from Consul whenever it restarts, so the cluster view survives a cold reboot without anyone re-announcing.
 - The broker layer is *fast and gRPC-native* (streaming, sub-second propagation); the Consul layer is *resilient and authoritative* (HTTP, active probes, restart-survivable). They complement each other.

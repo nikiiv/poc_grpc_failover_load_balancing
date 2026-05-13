@@ -5,44 +5,133 @@
 ## Architecture overview
 
 ```
-                            ┌──────────────────────────┐
-                            │ React + Vite UI (5173)    │
-                            └───────────┬──────────────┘
-                                        │ HTTP + SSE
-                                        ▼
-                            ┌──────────────────────────┐
-                            │  nginx (front door)       │
-                            │   /api/trading/*  →┐      │
-                            │   /api/billing/*  →┤      │
-                            └────────────────────┼─────┘
-                                  ┌──────────────┘
-                                  ▼
-        ┌────────────────────┐         ┌────────────────────┐
-        │  trading BFFs       │         │  billing BFFs       │
-        │  bff-t-1, bff-t-2   │         │  bff-b-1, bff-b-2   │
-        └─────┬────────┬──────┘         └─────┬────────┬─────┘
-              │        │   ┌────────────┐     │        │
-              │        │   │  Lifecycle │     │        │
-              │ ─Announce/─►   Broker   │◄─Subscribe─  │
-              │ Subscribe │  (:7100)    │ Announce─────┤
-              │        │   └─────┬──────┘     │        │
-              │        │         │            │        │
-              ▼        ▼         │            ▼        ▼
-       ┌────────────┬────────────┴───────────────────────┐
-       │ server-t-1 │ server-t-2     server-b-1 server-b-2 │
-       │ (role=trading)               (role=billing)         │
-       │  Echo / Compute / Drain / grpc.health.v1.Health     │
-       └─────────────────────────────────────────────────────┘
+                  ┌─────────────────────────────────────┐
+                  │      Web browser  (your laptop)     │
+                  │       Loads SPA, makes /api calls   │
+                  └──────────────────┬──────────────────┘
+                                     │ HTTP + SSE  (port 5173)
+                                     ▼
+                  ┌─────────────────────────────────────┐
+                  │     `ui` container — nginx          │
+                  │  (a) GET /             → SPA bundle │
+                  │  (b) /api/trading/*    → upstream A │
+                  │  (c) /api/billing/*    → upstream B │
+                  └──────┬───────────────────────┬──────┘
+                         │                       │
+                         ▼                       ▼
+       ┌────────────────────┐         ┌────────────────────┐
+       │  trading BFFs       │         │  billing BFFs       │
+       │  bff-t-1, bff-t-2   │         │  bff-b-1, bff-b-2   │
+       └─────┬────────┬──────┘         └─────┬────────┬─────┘
+             │        │   ┌────────────┐     │        │
+             │        │   │  Lifecycle │     │        │
+             │ ─Announce/─►   Broker   │◄─Subscribe─  │
+             │ Subscribe │  (:7100)    │ Announce─────┤
+             │        │   └─────┬──────┘     │        │
+             │        │         │            │        │
+             ▼        ▼         │            ▼        ▼
+      ┌────────────┬────────────┴───────────────────────┐
+      │ server-t-1 │ server-t-2     server-b-1 server-b-2 │
+      │ (role=trading)               (role=billing)         │
+      │  Echo / Compute / Drain / grpc.health.v1.Health     │
+      └─────────────────────────────────────────────────────┘
 ```
 
 Key shapes:
 
 - The **lifecycle broker** is a separate gRPC service. It's a dumb fan-out: every BFF and every backend announces itself there once on boot; every BFF subscribes to a stream of everyone else's announcements.
 - The broker is role-blind. It doesn't know what "trading" or "billing" means — it just relays events. Subscribers filter locally.
-- nginx routes `/api/trading/*` to one upstream and `/api/billing/*` to another, with passive health checks for transparent BFF failover.
+- The `ui` container runs nginx; one nginx process does double duty (see next section). It serves the SPA *and* routes `/api/trading/*` and `/api/billing/*` to the right BFF upstream, with passive health checks for transparent BFF failover.
 - Each backend hosts three gRPC services: `EchoService` (business RPCs), `DrainService` (control), and the standard `grpc.health.v1.Health`. BFFs of the same role open a `Health/Watch` stream against each.
 - The BFFs do *not* host a gRPC server. Their only gRPC role is **client**: they call the broker (announce / subscribe) and the backends (echo / drain / health-watch).
 - An additional **Consul** layer probes both backends and BFFs as a parallel observability plane — see [CONSUL.md](CONSUL.md).
+
+## What serves the UI to the browser?
+
+A single container called **`ui`**, running **nginx 1.27-alpine** built from `web-client/Dockerfile`. There is *no* separate "frontend server" or static-file server — nginx wears both hats.
+
+### How the image is built
+
+`web-client/Dockerfile` is a two-stage build:
+
+```dockerfile
+# Stage 1: build the React bundle
+FROM node:20-alpine AS build
+WORKDIR /src
+COPY web-client/package.json web-client/package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm npm install
+COPY web-client ./
+RUN npm run build           # → /src/dist/index.html + JS + CSS
+
+# Stage 2: nginx serving that bundle + reverse-proxying /api
+FROM nginx:1.27-alpine
+COPY web-client/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /src/dist /usr/share/nginx/html
+```
+
+So the final image contains the *built* SPA (already compiled, minified, tree-shaken by Vite) plus one nginx config. Vite is not running at request time — there's no Node.js process in the `ui` container at all.
+
+### Two jobs, one nginx config
+
+`web-client/nginx.conf` has two responsibilities in the same `server { listen 80; }` block:
+
+```nginx
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;       # the built SPA lives here
+    index index.html;
+
+    # Job 1: serve the SPA. Any path that doesn't start with /api/.
+    # try_files falls back to /index.html so client-side routing works.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Job 2: reverse-proxy /api/trading/* to the trading BFFs upstream.
+    location /api/trading/ {
+        rewrite ^/api/trading/(.*)$ /api/$1 break;
+        proxy_pass http://trading_bff;
+        proxy_buffering off;          # SSE needs this off
+        proxy_read_timeout 1h;        # SSE streams live a long time
+        ...
+    }
+
+    location /api/billing/ { /* same shape, different upstream */ }
+}
+```
+
+### Tracing a request from a browser click
+
+When you click **"Send 1 Echo"** in the UI's trading tab, two HTTP requests reach the `ui` container:
+
+```
+1. GET http://localhost:5173/
+   ── browser asks for the page
+   ── nginx: location /  → serves /usr/share/nginx/html/index.html
+   ── browser parses, requests bundled JS, gets them from the same nginx
+   ── React app runs in the browser
+
+2. POST http://localhost:5173/api/trading/echo
+   ── triggered by the React app's onClick
+   ── nginx: location /api/trading/  → rewrites path to /api/echo
+   ── proxy_pass http://trading_bff (upstream block: bff-t-1, bff-t-2)
+   ── nginx picks a healthy BFF (round-robin / failover)
+   ── BFF calls a backend over gRPC, returns the response
+   ── nginx forwards the response back to the browser
+```
+
+The browser never directly talks to a BFF — every `/api/*` request goes through nginx in the `ui` container, which is also where the SPA itself came from. This is why "the UI" and "nginx front door" are the same container.
+
+### Why one container instead of two
+
+We could have run `nginx` and a separate "static SPA server" as two containers. Combining them is standard practice for SPA + reverse-proxy setups because:
+
+- The SPA bundle is just files — nginx serves files trivially fast.
+- Same `:80` port for SPA *and* API means the browser sees no CORS concerns.
+- One fewer container; one fewer hop.
+
+In production you might split them (CDN for static assets + dedicated reverse-proxy / API-gateway), but for this POC the integration is straightforward.
 
 ## Module layout
 
