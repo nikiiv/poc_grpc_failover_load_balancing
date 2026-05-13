@@ -550,12 +550,13 @@ Alongside the broker, every backend and every BFF also registers itself with a *
 
 This layer is **purely additive** in this slice — routing decisions still go through the broker + per-BFF `Health.Watch`. Consul gives a second, independent view of cluster health with a built-in UI at <http://localhost:8500/ui/>.
 
-Why have both? Two reasons:
+Why have both? Three reasons:
 
 1. **A safety net at a different layer.** If our broker were to misbehave, Consul's view still shows ground truth via active probes.
-2. **A natural migration path.** Future slices can incrementally route via Consul's catalog (BFF watch loops, `consul-template` for nginx, ACLs/mTLS via Consul Connect) until the broker is no longer needed.
+2. **Broker recovery without re-announces.** The broker queries Consul on startup (`GET /v1/health/service/{name}?passing`) and pre-seeds its in-memory map before opening its listener. A broker restart no longer requires every node to re-announce — the cluster view is reconstructed from Consul's catalog in milliseconds. See [`BrokerApp.java`](lifecycle-broker/src/main/java/com/example/poc/broker/BrokerApp.java) and [`ConsulBootstrap.java`](lifecycle-broker/src/main/java/com/example/poc/broker/ConsulBootstrap.java).
+3. **A natural migration path.** Future slices can incrementally route via Consul's catalog (BFF watch loops, `consul-template` for nginx, ACLs/mTLS via Consul Connect) until the broker is no longer needed.
 
-Code is in [`grpc-server/.../ConsulRegistrar.java`](grpc-server/src/main/java/com/example/poc/server/ConsulRegistrar.java) and [`bff/.../consul/ConsulRegistrar.java`](bff/src/main/java/com/example/poc/bff/consul/ConsulRegistrar.java). Both use Java's stdlib `java.net.http.HttpClient` — no new dependencies — and `PUT /v1/agent/service/register` / `PUT /v1/agent/service/deregister/{id}` on the Consul HTTP API.
+Registration code: [`grpc-server/.../ConsulRegistrar.java`](grpc-server/src/main/java/com/example/poc/server/ConsulRegistrar.java) and [`bff/.../consul/ConsulRegistrar.java`](bff/src/main/java/com/example/poc/bff/consul/ConsulRegistrar.java). Both use Java's stdlib `java.net.http.HttpClient` and `PUT /v1/agent/service/register` / `PUT /v1/agent/service/deregister/{id}` on the Consul HTTP API. Broker-side bootstrap uses Jackson (the one place we need real JSON parsing).
 
 Quick check:
 
@@ -580,7 +581,7 @@ Note: **7100, not 7000** — macOS Control Center / AirPlay Receiver binds 7000 
 
 - TLS — everything is plaintext.
 - Persistent state — registries (broker and BFF) are all in-memory.
-- Broker redundancy — single instance. If it dies, existing routes keep working but new announcements can't get through until it comes back.
+- Broker redundancy — single instance. If it dies, existing routes keep working; a new broker process bootstraps the cluster view from Consul on restart, so the gap is short. Multiple brokers + Raft would be the production fix.
 - Retry / backoff on the `EchoStub.echo` call — single attempt; failure returns 502.
 - Authentication / authorization on the broker — anyone reachable can announce or withdraw a node.
 - Per-service health (`grpc.health.v1.Health` supports watching individual service names) — we only use the overall `""` service watch.

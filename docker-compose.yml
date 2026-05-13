@@ -6,8 +6,13 @@ services:
       dockerfile: lifecycle-broker/Dockerfile
     container_name: broker
     hostname: broker
+    environment:
+      # On startup, the broker queries Consul (?passing) and pre-seeds its in-memory
+      # cluster view. Recovers from a broker restart even if no node re-announces.
+      CONSUL_TARGET: consul:8500
     ports:
       - "7100:7100"
+    depends_on: [consul]
     networks: [poc-net]
 
   consul:

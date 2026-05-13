@@ -32,6 +32,9 @@ dependencies {
 
     implementation("org.slf4j:slf4j-api:2.0.13")
     runtimeOnly("ch.qos.logback:logback-classic:1.5.6")
+
+    // Jackson for parsing Consul's /v1/health/service/* responses on broker bootstrap.
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
 }
 
 application {

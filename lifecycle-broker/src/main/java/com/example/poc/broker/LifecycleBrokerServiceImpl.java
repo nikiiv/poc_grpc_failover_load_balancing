@@ -27,6 +27,17 @@ public final class LifecycleBrokerServiceImpl extends LifecycleBrokerGrpc.Lifecy
 
     private record Subscription(String subscriberNodeId, StreamObserver<LifecycleEvent> stream) {}
 
+    /**
+     * Pre-populate the in-memory nodes map. Must be called BEFORE the gRPC server starts
+     * accepting Subscribe calls — there's no broadcast for seeded nodes, since by
+     * definition no one is subscribed yet.
+     */
+    void seed(java.util.Collection<NodeInfo> initial) {
+        for (NodeInfo n : initial) {
+            nodes.putIfAbsent(n.getNodeId(), n);
+        }
+    }
+
     @Override
     public void announce(NodeInfo req, StreamObserver<Ack> resp) {
         if (req.getNodeId().isEmpty()) {
