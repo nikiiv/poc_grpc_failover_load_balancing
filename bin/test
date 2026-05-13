@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+# Integration test suite for the POC.
+#
+# Usage:
+#   ./bin/test                       # bring up, run all, tear down
+#   ./bin/test --existing            # skip bring-up; assume stack is already running
+#   ./bin/test --keep-stack          # don't tear down after run (debugging)
+#   ./bin/test test_foo test_bar     # run only the named tests
+#   ./bin/test --list                # list every test name in suite order
+#
+# Tests run in a deterministic order — read-only first, destructive (kill / drain /
+# restart) after. Every destructive test restores baseline state at the end so the
+# next test starts fresh. Total runtime: ~3–4 min on a clean stack.
+
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+COMPOSE="./bin/compose"
+C="./bin/c"
+BASE="http://127.0.0.1:5173"
+CONSUL="http://127.0.0.1:8500"
+TMP="${TMPDIR:-/tmp}/poc-test.$$.json"
+trap 'rm -f "$TMP"' EXIT
+
+# ── Args ────────────────────────────────────────────────────────────────────
+KEEP=0; USE_EXISTING=0; LIST_ONLY=0
+SELECTED=()
+for a in "$@"; do
+    case "$a" in
+        --keep-stack) KEEP=1 ;;
+        --existing)   USE_EXISTING=1 ;;
+        --list)       LIST_ONLY=1 ;;
+        test_*)       SELECTED+=("$a") ;;
+        -h|--help)
+            sed -n '/^# Usage:/,/^$/p' "$0"; exit 0 ;;
+        *) echo "unknown arg: $a"; exit 1 ;;
+    esac
+done
+
+# ── Colours ─────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    BOLD=$'\033[1m'; DIM=$'\033[2m'
+    GREEN=$'\033[32m'; AMBER=$'\033[33m'; RED=$'\033[31m'
+    BLUE=$'\033[34m'; RESET=$'\033[0m'
+else
+    BOLD=""; DIM=""; GREEN=""; AMBER=""; RED=""; BLUE=""; RESET=""
+fi
+
+PASS=0; FAIL=0; SKIP=0; FAILED_NAMES=()
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+# wait_for TIMEOUT_S "description" command...
+wait_for() {
+    local timeout="$1" desc="$2"; shift 2
+    local start; start=$(date +%s)
+    while (( $(date +%s) - start < timeout )); do
+        if "$@" >/dev/null 2>&1; then return 0; fi
+        sleep 0.5
+    done
+    echo "    ${AMBER}timeout (${timeout}s) waiting for: $desc${RESET}" >&2
+    return 1
+}
+
+count_servers() {
+    local role="$1"
+    curl -fsS "$BASE/api/$role/servers" 2>/dev/null \
+        | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null \
+        || echo 0
+}
+
+# Restore a container to running state (start if stopped, recreate if missing).
+ensure_running() {
+    local name="$1"
+    local status
+    status=$("$C" inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)
+    if [[ "$status" == "running" ]]; then return 0; fi
+    if [[ "$status" == "missing" ]]; then
+        # Container was removed entirely; recreate via compose. This covers the case
+        # where a `rm -f` left it gone.
+        "$COMPOSE" up -d "$name" >/dev/null 2>&1 \
+            || "$COMPOSE" --profile extra up -d "$name" >/dev/null 2>&1
+    else
+        "$C" start "$name" >/dev/null 2>&1 || true
+    fi
+}
+
+# Wait until role's bucket has exactly N healthy servers visible to the BFF.
+wait_bucket_size() {
+    local role="$1" expected="$2" timeout="${3:-20}"
+    wait_for "$timeout" "${role} bucket size = ${expected}" bash -c "
+        [ \"\$(curl -fsS http://127.0.0.1:5173/api/${role}/servers 2>/dev/null \
+                | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' \
+                2>/dev/null || echo 0)\" = \"${expected}\" ]
+    "
+}
+
+# Restore baseline (4 servers, 4 BFFs in their respective buckets).
+restore_baseline() {
+    for n in server-t-1 server-t-2 server-b-1 server-b-2 bff-t-1 bff-t-2 bff-b-1 bff-b-2; do
+        ensure_running "$n"
+    done
+    wait_bucket_size trading 2 25 || return 1
+    wait_bucket_size billing 2 25 || return 1
+    # Echo via nginx to flush any dead-BFF state in passive-check window
+    curl -fsS -X POST "$BASE/api/trading/echo" -H 'Content-Type: application/json' \
+        -d '{"message":"warmup"}' >/dev/null 2>&1 || true
+    curl -fsS -X POST "$BASE/api/billing/echo" -H 'Content-Type: application/json' \
+        -d '{"message":"warmup"}' >/dev/null 2>&1 || true
+}
+
+# Precondition guard — used by destructive tests to verify baseline before they touch
+# anything. Tolerates transient state by waiting up to 10 s for both buckets to be at 2.
+require_baseline() {
+    if ! wait_bucket_size trading 2 10 || ! wait_bucket_size billing 2 10; then
+        echo "    baseline check failed (trading=$(count_servers trading), billing=$(count_servers billing))" >&2
+        return 1
+    fi
+}
+
+fire_echoes_count_200() {
+    local role="$1" n="$2" ok=0
+    for i in $(seq 1 "$n"); do
+        local code
+        code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "$BASE/api/$role/echo" \
+                -H 'Content-Type: application/json' \
+                -d "{\"message\":\"test-$i\"}")
+        [[ "$code" == "200" ]] && ok=$((ok + 1))
+    done
+    echo "$ok"
+}
+
+fire_echoes_unique_servers() {
+    local role="$1" n="$2"
+    for i in $(seq 1 "$n"); do
+        curl -fsS -X POST "$BASE/api/$role/echo" \
+            -H 'Content-Type: application/json' \
+            -d "{\"message\":\"test-$i\"}" 2>/dev/null \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['serverId'])" 2>/dev/null
+    done | sort -u
+}
+
+run_test() {
+    local name="$1"
+    printf "${BOLD}▸ %s${RESET}\n" "$name"
+    if "$name"; then
+        echo "  ${GREEN}✓ pass${RESET}"
+        PASS=$((PASS + 1))
+    else
+        echo "  ${RED}✗ fail${RESET}"
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES+=("$name")
+    fi
+}
+
+# ── Tests ───────────────────────────────────────────────────────────────────
+
+# ── A. Baseline / read-only ─────────────────────────────────────────────────
+
+test_containers_running() {
+    for n in broker consul bff-t-1 bff-t-2 bff-b-1 bff-b-2 \
+             server-t-1 server-t-2 server-b-1 server-b-2 ui; do
+        if ! "$C" inspect -f '{{.State.Running}}' "$n" 2>/dev/null | grep -q true; then
+            echo "    missing or not running: $n" >&2; return 1
+        fi
+    done
+}
+
+test_consul_responds() {
+    local leader; leader=$(curl -fsS "$CONSUL/v1/status/leader" 2>/dev/null)
+    [[ -n "$leader" ]] || { echo "    no leader from $CONSUL/v1/status/leader" >&2; return 1; }
+}
+
+test_ui_serves_html() {
+    local code; code=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/")
+    [[ "$code" == "200" ]] || { echo "    HTTP $code from $BASE/" >&2; return 1; }
+}
+
+test_trading_bucket_size_2() {
+    [[ "$(count_servers trading)" == "2" ]] \
+        || { echo "    trading bucket = $(count_servers trading), expected 2" >&2; return 1; }
+}
+
+test_billing_bucket_size_2() {
+    [[ "$(count_servers billing)" == "2" ]] \
+        || { echo "    billing bucket = $(count_servers billing), expected 2" >&2; return 1; }
+}
+
+test_consul_has_all_8_services() {
+    local n
+    n=$(curl -fsS "$CONSUL/v1/agent/services" \
+        | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    [[ "$n" == "8" ]] || { echo "    Consul services = $n, expected 8" >&2; return 1; }
+}
+
+test_consul_health_all_passing() {
+    local critical
+    critical=$(curl -fsS "$CONSUL/v1/health/state/critical" \
+        | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    [[ "$critical" == "0" ]] || { echo "    $critical critical checks (expected 0)" >&2; return 1; }
+}
+
+test_trading_echo_works() {
+    local server
+    server=$(curl -fsS -X POST "$BASE/api/trading/echo" \
+            -H 'Content-Type: application/json' -d '{"message":"hi"}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["serverId"])')
+    [[ "$server" == server-t-* ]] \
+        || { echo "    trading echo returned $server (expected server-t-*)" >&2; return 1; }
+}
+
+test_billing_echo_works() {
+    local server
+    server=$(curl -fsS -X POST "$BASE/api/billing/echo" \
+            -H 'Content-Type: application/json' -d '{"message":"hi"}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["serverId"])')
+    [[ "$server" == server-b-* ]] \
+        || { echo "    billing echo returned $server (expected server-b-*)" >&2; return 1; }
+}
+
+test_trading_round_robin_hits_both() {
+    local hits
+    hits=$(fire_echoes_unique_servers trading 8 | wc -l | tr -d ' ')
+    (( hits >= 2 )) || { echo "    only $hits unique trading servers in 8 echoes" >&2; return 1; }
+}
+
+test_role_isolation() {
+    local hit
+    hit=$(fire_echoes_unique_servers billing 6 | grep -c '^server-t-' || true)
+    (( hit == 0 )) \
+        || { echo "    $hit billing echoes hit a trading server (cross-bucket leak)" >&2; return 1; }
+}
+
+test_known_nodes_includes_other_roles() {
+    local n
+    n=$(curl -fsS "$BASE/api/trading/known-nodes" \
+        | python3 -c 'import json,sys; print(sum(1 for n in json.load(sys.stdin) if n["role"]=="billing"))')
+    (( n >= 4 )) || { echo "    only $n billing entries in trading known-nodes (expected ≥ 4)" >&2; return 1; }
+}
+
+# ── B. Server lifecycle ─────────────────────────────────────────────────────
+
+test_kill_server_drops_from_bff() {
+    require_baseline || return 1
+    "$C" kill server-t-1 >/dev/null
+    local detected=0
+    wait_bucket_size trading 1 10 && detected=1
+    # Restore baseline regardless of result so subsequent tests are unaffected
+    "$C" start server-t-1 >/dev/null
+    wait_bucket_size trading 2 30 || { echo "    cleanup: server-t-1 didn't rejoin within 30 s" >&2; return 1; }
+    (( detected == 1 )) || { echo "    BFF didn't drop server-t-1 within 10 s" >&2; return 1; }
+}
+
+test_kill_server_marked_critical_in_consul() {
+    require_baseline || return 1
+    "$C" kill server-t-1 >/dev/null
+    local consul_ok=0
+    wait_for 8 "Consul marks server-t-1 critical" bash -c '
+        s=$(curl -fsS http://127.0.0.1:8500/v1/health/service/echo-server?passing=false \
+            | python3 -c "
+import json,sys
+for e in json.load(sys.stdin):
+    if e[\"Service\"][\"ID\"]==\"server-t-1\":
+        for c in e[\"Checks\"]:
+            if \"gRPC\" in c[\"Name\"]:
+                print(c[\"Status\"]); sys.exit()
+print(\"missing\")
+")
+        [ "$s" = "critical" ]
+    ' && consul_ok=1
+    "$C" start server-t-1 >/dev/null
+    wait_bucket_size trading 2 30 || { echo "    cleanup: server-t-1 didn't rejoin within 30 s" >&2; return 1; }
+    (( consul_ok == 1 )) || { echo "    Consul didn't mark server-t-1 critical within 8 s" >&2; return 1; }
+}
+
+test_kill_billing_server_isolates_trading() {
+    require_baseline || return 1
+    "$C" kill server-b-1 >/dev/null
+    local checked=0 bad=0
+    for _ in 1 2 3 4 5 6; do
+        sleep 1
+        local n; n=$(count_servers trading)
+        checked=$((checked+1))
+        [[ "$n" != "2" ]] && bad=$((bad+1))
+    done
+    "$C" start server-b-1 >/dev/null
+    wait_bucket_size billing 2 30 || { echo "    cleanup: server-b-1 didn't rejoin within 30 s" >&2; return 1; }
+    (( bad == 0 )) || { echo "    trading bucket changed $bad/$checked samples after billing kill" >&2; return 1; }
+}
+
+test_drain_removes_server() {
+    require_baseline || return 1
+    curl -fsS -X POST "$BASE/api/trading/servers/server-t-2/drain" >/dev/null
+    local detected=0
+    wait_bucket_size trading 1 10 && detected=1
+    "$C" start server-t-2 >/dev/null
+    wait_bucket_size trading 2 30 || { echo "    cleanup: server-t-2 didn't rejoin within 30 s" >&2; return 1; }
+    (( detected == 1 )) || { echo "    drain didn't remove server-t-2 within 10 s" >&2; return 1; }
+}
+
+# ── C. BFF lifecycle ────────────────────────────────────────────────────────
+
+test_kill_bff_transparent_failover() {
+    require_baseline || return 1
+    "$C" kill bff-t-1 >/dev/null
+    sleep 2  # let nginx mark it down on first attempt
+    local ok; ok=$(fire_echoes_count_200 trading 10)
+    "$C" start bff-t-1 >/dev/null
+    # Wait until echoes are clean again (BFF process up + nginx fail_timeout expired)
+    wait_for 25 "bff-t-1 ready" bash -c '
+        c=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:5173/api/trading/echo \
+            -H "Content-Type: application/json" -d "{\"message\":\"warmup\"}")
+        [ "$c" = "200" ]
+    '
+    (( ok >= 8 )) || { echo "    only $ok/10 echoes succeeded during BFF outage (expected ≥ 8)" >&2; return 1; }
+}
+
+test_kill_bff_marked_critical_in_consul() {
+    require_baseline || return 1
+    "$C" kill bff-t-1 >/dev/null
+    local ok=0
+    if wait_for 8 "Consul marks bff-t-1 critical" bash -c '
+        s=$(curl -fsS http://127.0.0.1:8500/v1/health/service/bff?passing=false \
+            | python3 -c "
+import json,sys
+for e in json.load(sys.stdin):
+    if e[\"Service\"][\"ID\"]==\"bff-t-1\":
+        for c in e[\"Checks\"]:
+            if \"HTTP\" in c[\"Name\"]:
+                print(c[\"Status\"]); sys.exit()
+print(\"missing\")
+")
+        [ "$s" = "critical" ]
+    '; then ok=1; fi
+    "$C" start bff-t-1 >/dev/null
+    sleep 6  # let bff register and nginx fail_timeout expire
+    (( ok == 1 )) || return 1
+}
+
+# ── D. Broker resilience ────────────────────────────────────────────────────
+
+test_broker_restart_bootstraps_from_consul() {
+    require_baseline || return 1
+    # Snapshot the count of successful (non-zero) bootstrap lines BEFORE the restart, so
+    # we can confirm the restart genuinely produced a new bootstrap.
+    local before
+    before=$("$C" logs broker 2>&1 | grep -c "Consul bootstrap: [1-9]" || true)
+
+    "$C" restart broker >/dev/null
+    # Give broker enough time to come up, bootstrap, and start serving.
+    sleep 6
+
+    local after
+    after=$("$C" logs broker 2>&1 | grep -c "Consul bootstrap: [1-9]" || true)
+    (( after > before )) \
+        || { echo "    bootstrap count didn't increase (before=$before after=$after)" >&2; return 1; }
+
+    # Known-nodes view in the BFFs should be fully repopulated after the restart.
+    wait_for 20 "BFF known-nodes view ≥ 8 nodes after restart" bash -c '
+        n=$(curl -fsS http://127.0.0.1:5173/api/trading/known-nodes \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+        [ "$n" -ge 8 ]
+    ' || return 1
+}
+
+# ── E. Scale-out ────────────────────────────────────────────────────────────
+
+test_scale_out_server_t_3() {
+    require_baseline || return 1
+    "$COMPOSE" --profile extra up -d server-t-3 >/dev/null 2>&1
+    local ok=0
+    if wait_for 15 "server-t-3 joins trading pool" bash -c '
+        curl -fsS http://127.0.0.1:5173/api/trading/servers \
+            | python3 -c "import json,sys; ids=[s[\"id\"] for s in json.load(sys.stdin)]; sys.exit(0 if \"server-t-3\" in ids else 1)"
+    '; then ok=1; fi
+    # Cleanup: stop and remove so baseline is restored
+    "$COMPOSE" --profile extra stop server-t-3 >/dev/null 2>&1
+    "$C" rm -f server-t-3 >/dev/null 2>&1
+    wait_bucket_size trading 2 15 || true
+    (( ok == 1 )) || return 1
+}
+
+# ── Test order ──────────────────────────────────────────────────────────────
+# Deterministic; read-only first, then progressively more invasive.
+TESTS_ALL=(
+    # A. read-only
+    test_containers_running
+    test_consul_responds
+    test_ui_serves_html
+    test_trading_bucket_size_2
+    test_billing_bucket_size_2
+    test_consul_has_all_8_services
+    test_consul_health_all_passing
+    test_trading_echo_works
+    test_billing_echo_works
+    test_trading_round_robin_hits_both
+    test_role_isolation
+    test_known_nodes_includes_other_roles
+    # B. server lifecycle
+    test_kill_server_drops_from_bff
+    test_kill_server_marked_critical_in_consul
+    test_kill_billing_server_isolates_trading
+    test_drain_removes_server
+    # C. BFF lifecycle
+    test_kill_bff_transparent_failover
+    test_kill_bff_marked_critical_in_consul
+    # D. broker
+    test_broker_restart_bootstraps_from_consul
+    # E. scale-out
+    test_scale_out_server_t_3
+)
+
+if (( LIST_ONLY )); then
+    printf '%s\n' "${TESTS_ALL[@]}"; exit 0
+fi
+
+# Resolve which tests actually run
+if (( ${#SELECTED[@]} == 0 )); then
+    TESTS=("${TESTS_ALL[@]}")
+else
+    TESTS=("${SELECTED[@]}")
+fi
+
+# ── Lifecycle ───────────────────────────────────────────────────────────────
+echo
+echo "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${RESET}"
+echo "${BOLD}${BLUE}  POC integration test suite${RESET}"
+echo "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${RESET}"
+
+if (( USE_EXISTING )); then
+    echo "${DIM}Using existing stack (--existing)${RESET}"
+else
+    echo "${DIM}Bringing up stack...${RESET}"
+    "$COMPOSE" up --build -d 2>&1 | tail -3
+    echo "${DIM}Waiting 12 s for registrations to settle...${RESET}"
+    sleep 12
+fi
+
+echo
+for t in "${TESTS[@]}"; do
+    [[ -z "$t" ]] && continue
+    run_test "$t"
+done
+
+echo
+echo "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${RESET}"
+if (( FAIL == 0 )); then
+    echo "${BOLD}${GREEN}  ✓ all ${PASS} tests passed${RESET}"
+else
+    echo "${BOLD}${RED}  ✗ ${FAIL} failed, ${PASS} passed${RESET}"
+    echo "${RED}  failed:${RESET}"
+    for n in "${FAILED_NAMES[@]}"; do echo "    - $n"; done
+fi
+echo "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${RESET}"
+
+if (( KEEP == 0 && USE_EXISTING == 0 )); then
+    echo "${DIM}Tearing down...${RESET}"
+    "$COMPOSE" --profile extra down >/dev/null 2>&1
+fi
+
+exit $FAIL

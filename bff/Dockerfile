@@ -20,6 +20,9 @@ COPY --from=build /src/bff/build/libs/bff-all.jar app.jar
 # Note: `networkaddress.cache.ttl` is a SECURITY property (read from java.security), not
 # a system property — `-D` doesn't always honor it. `sun.net.inetaddr.ttl` is the supported
 # system-property override on OpenJDK.
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -Dsun.net.inetaddr.ttl=2 -Dsun.net.inetaddr.negative.ttl=0"
+# ttl=0: when rapid kill+restart cycles happen within a few seconds (as in the test suite),
+# even a 2 s cache holds stale IPs long enough to break the next channel. 0 forces a fresh
+# DNS lookup on each name resolution; trade-off is negligible for our request rate.
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -Dsun.net.inetaddr.ttl=0 -Dsun.net.inetaddr.negative.ttl=0"
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

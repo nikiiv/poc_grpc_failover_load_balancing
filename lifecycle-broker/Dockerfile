@@ -13,6 +13,6 @@ RUN groupadd -r app && useradd -r -g app app
 USER app
 WORKDIR /app
 COPY --from=build /src/lifecycle-broker/build/libs/lifecycle-broker-all.jar app.jar
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -Dsun.net.inetaddr.ttl=2 -Dsun.net.inetaddr.negative.ttl=0"
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -Dsun.net.inetaddr.ttl=0 -Dsun.net.inetaddr.negative.ttl=0"
 EXPOSE 7100
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

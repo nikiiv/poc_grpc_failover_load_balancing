@@ -481,6 +481,26 @@ The same nginx container serves the built static bundle *and* routes `/api/{role
 
 The wrappers in `bin/c` and `bin/compose` auto-detect `docker` (if its daemon is reachable) or fall back to `podman`. Docker ≥ 24 and Podman ≥ 5 are supported.
 
+## Tests
+
+```bash
+./bin/test                         # bring up, run all 20 tests, tear down (~4 min)
+./bin/test --existing              # run against an already-running stack
+./bin/test --keep-stack            # don't tear down at the end (debugging)
+./bin/test --list                  # show every test in suite order
+./bin/test test_kill_server_drops_from_bff   # run one
+```
+
+The suite covers:
+
+- **Baseline** — all 11 containers up, Consul + broker reachable, both buckets self-registered with 2 servers each, basic echo round-trips, role-isolation (a billing echo never hits a trading server), cross-role known-nodes view populated.
+- **Server lifecycle** — `kill -9` drops the backend from the BFF within ~2 s, Consul flips its gRPC check to `critical` within 2 s, a billing kill leaves the trading bucket untouched, graceful drain removes a server cleanly.
+- **BFF lifecycle** — `kill -9` a BFF; nginx fails over with ≥ 8 of 10 follow-up echoes succeeding (1–2 failures are expected during the `fail_timeout` retry window). Consul flips the HTTP check to `critical` within 2 s.
+- **Broker resilience** — `docker restart broker` triggers a fresh `Consul bootstrap` (non-zero seed count), and BFFs converge to 8 known nodes again within 15 s.
+- **Scale-out** — a brand-new `server-t-3` brought up via the `extra` profile is in the trading pool within 15 s of joining.
+
+Every destructive test restores baseline state before returning (kill+start the killed container, etc.), so subsequent tests start fresh. Total runtime is ~3–4 min on a cold-start (less with `--existing`).
+
 Demo commands:
 
 ```bash
