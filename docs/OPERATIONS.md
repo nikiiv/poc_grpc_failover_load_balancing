@@ -113,8 +113,8 @@ Note: **7100, not 7000** — macOS Control Center / AirPlay Receiver binds 7000 
 ## Things that aren't in scope
 
 - TLS — everything is plaintext.
-- Persistent state — registries (broker and BFF) are all in-memory.
-- Broker redundancy — single instance. If it dies, existing routes keep working; a new broker process bootstraps the cluster view from Consul on restart, so the gap is short. Multiple brokers + Raft would be the production fix.
+- Durable in-process state — the broker's nodes map and the BFF's registries are in-memory. Routing-critical state survives restarts via two automatic-recovery paths: the broker bootstraps from Consul on startup, and BFFs replace their registries from the broker's snapshot on Subscribe-reconnect. What *is* lost on restart is cosmetic UI state (recent-request log, RPS sliding window) — no persistent disk store is involved.
+- Broker redundancy — single instance. Existing routes keep working while it's down (channels and HealthWatchers in BFFs continue); new announcements queue at publishers until it's back. Production would run multiple brokers behind a TCP LB, or replace it with Consul-driven discovery (see below).
 - Retry / backoff on the `EchoStub.echo` call — single attempt; failure returns 502.
 - Authentication / authorization on the broker — anyone reachable can announce or withdraw a node.
 - Per-service health (`grpc.health.v1.Health` supports watching individual service names) — we only use the overall `""` service watch.

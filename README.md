@@ -57,4 +57,8 @@ The broker drives **routing**; Consul provides **independent observability** and
 
 ## Not production-ready
 
-Deliberate POC scope — no TLS, no authentication, single-instance broker, in-memory state. The patterns it shows are the same ones used in production gRPC systems at scale. See [docs/OPERATIONS.md § Things that aren't in scope](docs/OPERATIONS.md#things-that-arent-in-scope) for the full list.
+Deliberate POC scope — no TLS, no authentication, single-instance broker, single-node Consul (dev mode). The patterns it shows are the same ones used in production gRPC systems at scale.
+
+Cold-reboot recovery for routing-critical state *is* covered: when the broker restarts it bootstraps its cluster view from Consul (see [docs/CONSUL.md](docs/CONSUL.md)), and BFFs replace their in-memory registries from the broker's snapshot on reconnect. Only cosmetic state (the UI's recent-request log, RPS window) is lost on restart.
+
+See [docs/OPERATIONS.md § Things that aren't in scope](docs/OPERATIONS.md#things-that-arent-in-scope) for the full list.
